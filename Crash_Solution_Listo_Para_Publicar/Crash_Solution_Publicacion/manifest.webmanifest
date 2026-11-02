@@ -1,0 +1,26 @@
+{
+  "id": "./",
+  "name": "Crash Solution · Gestión del taller",
+  "short_name": "Crash Solution",
+  "description": "Gestioná trabajos, inspecciones y presupuestos del taller.",
+  "lang": "es-AR",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f4f6f8",
+  "theme_color": "#132c43",
+  "icons": [
+    {
+      "src": "./icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

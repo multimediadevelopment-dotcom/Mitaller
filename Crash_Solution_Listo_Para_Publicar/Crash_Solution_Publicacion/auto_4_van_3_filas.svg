@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 480" width="320" height="480">
+  <title>Van de tres filas (vista desde arriba)</title>
+  <rect width="320" height="480" fill="#f4f7fb"/>
+  <rect x="78" y="30" width="164" height="420" rx="34" fill="#ffffff" stroke="#50627a" stroke-width="3"/>
+  <path d="M106 60 Q160 50 214 60 L210 100 L110 100 Z" fill="#dfe8f3" stroke="#50627a" stroke-width="2"/>
+  <rect x="104" y="130" width="112" height="60" rx="8" fill="#eef3f9" stroke="#50627a" stroke-width="2"/>
+  <rect x="104" y="210" width="112" height="60" rx="8" fill="#eef3f9" stroke="#50627a" stroke-width="2"/>
+  <rect x="104" y="290" width="112" height="60" rx="8" fill="#eef3f9" stroke="#50627a" stroke-width="2"/>
+  <path d="M106 380 Q160 392 214 380 L210 420 L110 420 Z" fill="#dfe8f3" stroke="#50627a" stroke-width="2"/>
+  <line x1="78" y1="160" x2="104" y2="160" stroke="#50627a" stroke-width="2"/>
+  <line x1="78" y1="240" x2="104" y2="240" stroke="#50627a" stroke-width="2"/>
+  <line x1="78" y1="320" x2="104" y2="320" stroke="#50627a" stroke-width="2"/>
+  <line x1="242" y1="160" x2="216" y2="160" stroke="#50627a" stroke-width="2"/>
+  <line x1="242" y1="240" x2="216" y2="240" stroke="#50627a" stroke-width="2"/>
+  <line x1="242" y1="320" x2="216" y2="320" stroke="#50627a" stroke-width="2"/>
+  <text x="160" y="470" text-anchor="middle" font-family="Arial" font-size="12" fill="#718295">FRENTE ↑</text>
+</svg>
