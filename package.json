@@ -1,0 +1,24 @@
+{
+  "name": "mitaller-crash-solution",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "MiTallerApp / Crash Solution — Gestión integral de talleres mecánicos, inspecciones, presupuestos y stock con Supabase y soporte Offline.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.1",
+    "animate.css": "^4.1.1",
+    "jspdf": "^3.0.1"
+  },
+  "devDependencies": {
+    "jsdom": "^26.0.0",
+    "vite": "^6.2.0",
+    "vitest": "^3.0.7"
+  }
+}
