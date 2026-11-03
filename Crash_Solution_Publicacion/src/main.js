@@ -62,6 +62,12 @@ import {
   lockOfflineDataOnLogout,
   unlockOfflineDataForAuthenticatedOwner
 } from './lib/offline-sync.js'
+import {
+  saveNavigationState,
+  loadNavigationState,
+  clearNavigationState,
+  shouldReinitializeOnAuthEvent
+} from './lib/navigation-state.js'
 
 const esc = s =>
   String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
@@ -75,10 +81,13 @@ export const appAuthState = {
   activeWorkshopProfile: null,
   authMode: 'login', // 'login' | 'register' | 'reset' | 'update-password'
   loading: false,
+  isSessionBootstrapped: false,
   isOnline: typeof navigator !== 'undefined' ? navigator.onLine !== false : true,
   isSyncingOfflineQueue: false,
   pendingSyncCount: 0,
   unresolvedConflicts: [],
+  activePieceKey: null,
+  openPieceDetailsKeys: [],
   adminMembers: [],
   knownProfiles: [],
   stockItems: [],
@@ -344,10 +353,13 @@ async function handleRegisterSubmit(e) {
   }
   try {
     const res = await signUpWithEmail({ email, password, confirmPassword, displayName, phone })
-    if (res.requiresEmailConfirmation) {
+    if (res.session) {
+      await onSessionEstablished(res.session)
+      window.toast?.('Cuenta creada y sesión iniciada correctamente.')
+    } else if (res.requiresEmailConfirmation) {
       switchAuthMode(
         'login',
-        '¡Cuenta creada! Revisá tu correo electrónico y hacé clic en el enlace de confirmación antes de iniciar sesión.'
+        '¡Cuenta creada! Si tu servidor solicita verificación de correo, confirmalo desde tu bandeja de entrada o iniciá sesión con tus datos.'
       )
     } else {
       window.toast?.('Cuenta creada y sesión iniciada.')
@@ -435,6 +447,7 @@ export async function handleLogout() {
       userId: prevUserId,
       workshopId: activeMembership?.workshop_id || null
     })
+    clearNavigationState()
     if (window.store) {
       window.store.jobs = []
       window.store.activeId = null
@@ -446,13 +459,142 @@ export async function handleLogout() {
     appAuthState.profile = null
     appAuthState.memberships = []
     appAuthState.activeWorkshopProfile = null
+    appAuthState.isSessionBootstrapped = false
     appAuthState.pendingSyncCount = 0
     appAuthState.unresolvedConflicts = []
-    window.toast?.('Sesión cerrada. Los cambios pendientes quedaron resguardados y bloqueados hasta tu próximo ingreso.')
-    enforceRouteProtection()
+    appAuthState.activePieceKey = null
+    appAuthState.openPieceDetailsKeys = []
+    window.toast?.('Sesión cerrada. Los cambios pendientes quedaron resguardados en este dispositivo hasta tu próximo ingreso.')
+    await enforceRouteProtection()
   } catch (err) {
     window.toast?.(err.message || 'Error al cerrar sesión.')
   }
+}
+
+function getCurrentActiveScreenName() {
+  if (!document.getElementById('adminScreen')?.hidden) return 'admin'
+  if (!document.getElementById('profileScreen')?.hidden) return 'profile'
+  if (!document.getElementById('stockScreen')?.hidden) return 'stock'
+  if (!document.getElementById('workScreen')?.hidden) return 'work'
+  return 'jobs'
+}
+
+export function persistCurrentNavigationState(overrides = {}) {
+  if (!appAuthState.user?.id) return null
+  const activeMembership = getActiveMembership()
+  const openDetails = Array.from(
+    document.querySelectorAll('details.damage-details[open][data-piece-details]')
+  )
+    .map(el => el.getAttribute('data-piece-details'))
+    .filter(Boolean)
+
+  if (openDetails.length > 0 || document.querySelectorAll('details.damage-details').length > 0) {
+    appAuthState.openPieceDetailsKeys = openDetails
+  }
+
+  const mapDisclosureEl = document.getElementById('mapDisclosure')
+
+  return saveNavigationState({
+    userId: appAuthState.user.id,
+    workshopId: activeMembership?.workshop_id || appAuthState.activeWorkshopId || null,
+    screen: overrides.screen || getCurrentActiveScreenName(),
+    activeJobId:
+      overrides.activeJobId !== undefined
+        ? overrides.activeJobId
+        : window.active?.id || window.store?.activeId || null,
+    step: overrides.step || window.step || 'reception',
+    area: overrides.area || window.active?.area || 'Parte delantera',
+    page: overrides.page !== undefined ? overrides.page : Number(window.page || 0),
+    activePieceKey:
+      overrides.activePieceKey !== undefined ? overrides.activePieceKey : appAuthState.activePieceKey,
+    openPieceDetailsKeys:
+      overrides.openPieceDetailsKeys !== undefined
+        ? overrides.openPieceDetailsKeys
+        : appAuthState.openPieceDetailsKeys,
+    mapOpen:
+      overrides.mapOpen !== undefined
+        ? overrides.mapOpen
+        : mapDisclosureEl
+          ? Boolean(mapDisclosureEl.open)
+          : true,
+    scrollY:
+      overrides.scrollY !== undefined
+        ? overrides.scrollY
+        : typeof window !== 'undefined'
+          ? Math.round(window.scrollY || 0)
+          : 0
+  })
+}
+
+export async function restoreSavedNavigationState() {
+  if (!appAuthState.user?.id) return false
+  const activeMembership = getActiveMembership()
+  const saved = loadNavigationState({
+    userId: appAuthState.user.id,
+    workshopId: activeMembership?.workshop_id || appAuthState.activeWorkshopId || null
+  })
+  if (!saved) return false
+
+  if (saved.screen === 'admin') {
+    await openAdminScreen()
+    return true
+  }
+  if (saved.screen === 'profile' && activeMembership) {
+    await openProfileScreen()
+    return true
+  }
+  if (saved.screen === 'stock' && activeMembership) {
+    await openStockScreen()
+    return true
+  }
+  if (saved.screen === 'work' && saved.activeJobId && window.store?.jobs?.length) {
+    const targetJob = window.store.jobs.find(j => j.id === saved.activeJobId)
+    if (targetJob) {
+      if (saved.area) {
+        targetJob.area = saved.area
+      }
+      appAuthState.activePieceKey = saved.activePieceKey || null
+      appAuthState.openPieceDetailsKeys = Array.isArray(saved.openPieceDetailsKeys)
+        ? saved.openPieceDetailsKeys
+        : []
+
+      const adminScreen = document.getElementById('adminScreen')
+      const profileScreen = document.getElementById('profileScreen')
+      const stockScreen = document.getElementById('stockScreen')
+      const jobsScreen = document.getElementById('jobsScreen')
+      const workScreen = document.getElementById('workScreen')
+      if (adminScreen) adminScreen.hidden = true
+      if (profileScreen) profileScreen.hidden = true
+      if (stockScreen) stockScreen.hidden = true
+      if (jobsScreen) jobsScreen.hidden = true
+      if (workScreen) workScreen.hidden = false
+
+      window.active = targetJob
+      window.store.activeId = targetJob.id
+      window.screen = 'work'
+      window.fillReception?.()
+      window.showStep?.(saved.step || 'reception', false)
+
+      if ((saved.step || 'reception') === 'inspection') {
+        window.page = Number(saved.page || 0)
+        const mapDisclosureEl = document.getElementById('mapDisclosure')
+        if (mapDisclosureEl && typeof saved.mapOpen === 'boolean') {
+          mapDisclosureEl.open = saved.mapOpen
+        }
+        window.renderInspection?.()
+      }
+
+      renderHeaderNavigation()
+
+      if (saved.scrollY > 0 && typeof window.scrollTo === 'function') {
+        requestAnimationFrame(() => {
+          window.scrollTo({ top: saved.scrollY, behavior: 'auto' })
+        })
+      }
+      return true
+    }
+  }
+  return false
 }
 
 async function refreshOfflineQueueStatus() {
@@ -477,15 +619,29 @@ function renderConflictResolutionNotice() {
 
   const conflicts = appAuthState.unresolvedConflicts || []
   if (!conflicts.length) {
+    if (appAuthState.isSyncingOfflineQueue) {
+      noticeEl.hidden = false
+      noticeEl.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+          <span>
+            <b>⏳ Sincronizando tus cambios con el servidor…</b>
+            Por favor, aguardá unos instantes mientras se actualizan los datos del taller.
+          </span>
+          <button type="button" class="button primary small-btn" id="manualSyncPendingBtn" disabled style="text-decoration:none;color:#fff">Sincronizando…</button>
+        </div>
+      `
+      return
+    }
+
     if (appAuthState.pendingSyncCount > 0) {
       noticeEl.hidden = false
       noticeEl.innerHTML = `
         <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
           <span>
-            <b>⏳ Tenés ${appAuthState.pendingSyncCount} trabajo(s) modificado(s) localmente pendiente(s) de sincronizar.</b>
+            <b>⏳ Tenés ${appAuthState.pendingSyncCount} trabajo(s) modificado(s) en este dispositivo pendiente(s) de sincronizar.</b>
             ${
               appAuthState.isOnline
-                ? 'Podés sincronizarlos ahora con el servidor.'
+                ? 'Podés sincronizarlos ahora mismo.'
                 : 'Se sincronizarán automáticamente en cuanto recuperes la conexión a Internet.'
             }
           </span>
@@ -497,9 +653,13 @@ function renderConflictResolutionNotice() {
         </div>
       `
       document.getElementById('manualSyncPendingBtn')?.addEventListener('click', () => {
-        syncPendingJobsWithSupabase()
+        syncPendingJobsWithSupabase({ manual: true })
       })
+      return
     }
+
+    noticeEl.hidden = true
+    noticeEl.innerHTML = ''
     return
   }
 
@@ -511,12 +671,12 @@ function renderConflictResolutionNotice() {
   noticeEl.innerHTML = `
     <div style="display:flex;flex-direction:column;gap:10px">
       <div>
-        <b>⚠️ Conflicto de sincronización detectado en ${esc(plate)} (${esc(client)})</b><br>
-        <span>Otro dispositivo guardó una versión más reciente (rev. ${esc(c.remoteRevision)}) mientras editabas la revisión ${esc(c.baseRevision)}. Elegí cómo resolverlo para no perder información:</span>
+        <b>⚠️ Diferencia de versiones detectada en ${esc(plate)} (${esc(client)})</b><br>
+        <span>Otro dispositivo guardó una versión más reciente mientras trabajabas en este vehículo. Elegí cómo querés continuar para no perder información:</span>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <button type="button" class="button primary small-btn" id="resolveKeepLocalBtn" style="text-decoration:none;color:#fff">Conservar mi edición local</button>
-        <button type="button" class="button secondary small-btn" id="resolveKeepRemoteBtn" style="text-decoration:none">Usar versión del servidor</button>
+        <button type="button" class="button primary small-btn" id="resolveKeepLocalBtn" style="text-decoration:none;color:#fff">Conservar mi edición actual</button>
+        <button type="button" class="button secondary small-btn" id="resolveKeepRemoteBtn" style="text-decoration:none">Usar versión guardada en otro dispositivo</button>
         <button type="button" class="button secondary small-btn" id="resolveKeepBothBtn" style="text-decoration:none">Conservar ambas (crear copia)</button>
       </div>
     </div>
@@ -533,11 +693,11 @@ function renderConflictResolutionNotice() {
         strategy
       })
       noticeEl.hidden = true
-      await syncPendingJobsWithSupabase()
+      await syncPendingJobsWithSupabase({ manual: true })
       await loadWorkshopJobsFromSupabase()
-      window.toast?.('Conflicto resuelto correctamente.')
+      window.toast?.('Diferencia resuelta y trabajo sincronizado correctamente.')
     } catch (err) {
-      window.toast?.(err.message || 'No se pudo resolver el conflicto.')
+      window.toast?.(err.message || 'No se pudo resolver la diferencia.')
     }
   }
 
@@ -613,7 +773,7 @@ function renderHeaderNavigation() {
            <button type="button" class="nav-pill ${isProfileView ? 'active' : ''}" id="navProfileBtn">Perfil del taller</button>`
         : ''
     }
-    <button type="button" class="nav-pill ${isAdminView ? 'active' : ''}" id="navAdminBtn">Admin (/admin)</button>
+    <button type="button" class="nav-pill ${isAdminView ? 'active' : ''}" id="navAdminBtn">Administración</button>
     <span class="user-badge" title="${esc(appAuthState.user.email)}">
       <span>${esc(displayName)}</span>
       <span class="role-chip ${esc(role)}">${esc(roleLabel)}</span>
@@ -720,17 +880,50 @@ export async function syncActiveWorkshopToLegacyStore() {
   }
 }
 
-export async function syncPendingJobsWithSupabase() {
+export async function syncPendingJobsWithSupabase({ manual = false } = {}) {
   const activeMembership = getActiveMembership()
-  if (!supabase || !appAuthState.user?.id || !activeMembership?.workshop_id) return null
-  if (!appAuthState.isOnline) return null
+  if (!supabase || !appAuthState.user?.id || !activeMembership?.workshop_id) {
+    if (manual) {
+      window.toast?.('Seleccioná un taller activo para sincronizar.')
+    }
+    return null
+  }
+  if (!appAuthState.isOnline) {
+    if (manual) {
+      window.toast?.('Sin conexión a Internet. Tus cambios están guardados y se sincronizarán al recuperar la red.')
+    }
+    return null
+  }
+
+  if (appAuthState.isSyncingOfflineQueue) {
+    if (manual) {
+      window.toast?.('Sincronización en curso. Aguardá unos instantes.')
+    }
+    return null
+  }
 
   if (isSessionExpired(appAuthState.session)) {
     await handleExpiredSession()
     return null
   }
 
+  // Si hay un guardado en espera (debounce) del trabajo abierto, encolarlo antes de sincronizar
+  if (window.__jobCloudTimer) {
+    clearTimeout(window.__jobCloudTimer)
+    window.__jobCloudTimer = null
+    if (window.active?.rec?.cliente?.trim() && window.active?.rec?.patente?.trim()) {
+      await enqueueJobSyncOperation({
+        userId: appAuthState.user.id,
+        workshopId: activeMembership.workshop_id,
+        job: window.active
+      }).catch(() => null)
+    }
+  }
+
+  const saveStateEl = document.getElementById('saveState')
   appAuthState.isSyncingOfflineQueue = true
+  if (saveStateEl) saveStateEl.textContent = 'Sincronizando…'
+  renderConflictResolutionNotice()
   renderHeaderNavigation()
 
   try {
@@ -742,21 +935,56 @@ export async function syncPendingJobsWithSupabase() {
       isOnline: appAuthState.isOnline
     })
 
+    appAuthState.isSyncingOfflineQueue = false
     await refreshOfflineQueueStatus()
     renderHeaderNavigation()
 
-    const saveStateEl = document.getElementById('saveState')
     if (result.conflicts > 0) {
-      if (saveStateEl) saveStateEl.textContent = 'Conflicto por resolver'
-      window.toast?.('Se detectó un conflicto con cambios realizados en otro dispositivo.')
+      if (saveStateEl) saveStateEl.textContent = 'Diferencia por resolver'
+      window.toast?.('Se detectó una diferencia con otra edición guardada. Elegí cómo continuar en el aviso superior.')
+    } else if (result.failed > 0) {
+      if (saveStateEl) saveStateEl.textContent = 'Guardado en este dispositivo'
+      window.toast?.(
+        'No se pudo completar la sincronización en este momento. Tus cambios siguen resguardados en este dispositivo.'
+      )
     } else if (result.synced > 0) {
-      if (saveStateEl) saveStateEl.textContent = 'Sincronizado en Supabase'
+      if (saveStateEl) saveStateEl.textContent = 'Todo sincronizado'
+      if (manual) {
+        window.toast?.(
+          result.synced === 1
+            ? 'Sincronización completada: 1 trabajo actualizado.'
+            : `Sincronización completada: ${result.synced} trabajos actualizados.`
+        )
+      }
+    } else if (manual) {
+      if (saveStateEl) saveStateEl.textContent = 'Todo sincronizado'
+      window.toast?.('No hay cambios pendientes para sincronizar. Todo está al día.')
     }
 
     return result
+  } catch (err) {
+    appAuthState.isSyncingOfflineQueue = false
+    await refreshOfflineQueueStatus()
+    renderHeaderNavigation()
+    if (saveStateEl) saveStateEl.textContent = 'Guardado en este dispositivo'
+    if (manual) {
+      window.toast?.('No se pudo conectar con el servidor. Tus cambios permanecen guardados en este dispositivo.')
+    }
+    return null
   } finally {
     appAuthState.isSyncingOfflineQueue = false
+    renderConflictResolutionNotice()
     renderHeaderNavigation()
+  }
+}
+
+function syncActiveJobReferenceInMemory() {
+  if (!window.active?.id || !Array.isArray(window.store?.jobs)) return
+  const currentArea = window.active.area
+  const matched = window.store.jobs.find(j => j.id === window.active.id)
+  if (matched) {
+    if (currentArea) matched.area = currentArea
+    window.active = matched
   }
 }
 
@@ -774,7 +1002,12 @@ export async function loadWorkshopJobsFromSupabase() {
   const localIndexedDbJobs = await getOfflineJobsForScope(userId, workshopId)
   if (localIndexedDbJobs.length > 0) {
     window.store.jobs = localIndexedDbJobs.map(j => (window.adaptJob ? window.adaptJob(j) : j))
-    window.renderJobs?.()
+    syncActiveJobReferenceInMemory()
+    if (window.screen === 'jobs') {
+      window.renderJobs?.()
+    } else if (window.screen === 'work' && window.active) {
+      window.updateWorkHeading?.()
+    }
   }
 
   await refreshOfflineQueueStatus()
@@ -846,7 +1079,12 @@ export async function loadWorkshopJobsFromSupabase() {
 
     const mergedJobs = await getOfflineJobsForScope(userId, workshopId)
     window.store.jobs = mergedJobs.map(j => (window.adaptJob ? window.adaptJob(j) : j))
-    window.renderJobs?.()
+    syncActiveJobReferenceInMemory()
+    if (window.screen === 'jobs') {
+      window.renderJobs?.()
+    } else if (window.screen === 'work' && window.active) {
+      window.updateWorkHeading?.()
+    }
     await refreshOfflineQueueStatus()
     renderHeaderNavigation()
 
@@ -917,6 +1155,7 @@ export async function openProfileScreen() {
   if (adminScreen) adminScreen.hidden = true
   if (stockScreen) stockScreen.hidden = true
   if (profileScreen) profileScreen.hidden = false
+  persistCurrentNavigationState({ screen: 'profile' })
   renderHeaderNavigation()
   await renderProfileScreen()
 }
@@ -927,7 +1166,7 @@ export async function renderProfileScreen() {
 
   const activeMembership = getActiveMembership()
   if (!activeMembership?.workshop) {
-    profileScreen.innerHTML = `<div class="notice">Seleccioná o creá un taller desde el panel <b>Admin (/admin)</b> para configurar su perfil.</div>`
+    profileScreen.innerHTML = `<div class="notice">Seleccioná o registrá un taller desde la sección <b>Administración</b> para configurar su perfil.</div>`
     return
   }
 
@@ -946,9 +1185,9 @@ export async function renderProfileScreen() {
   profileScreen.innerHTML = `
     <div class="page-heading">
       <div>
-        <p class="eyebrow">IDENTIDAD COMERCIAL Y PRESUPUESTOS · DEV-19</p>
+        <p class="eyebrow">IDENTIDAD COMERCIAL Y PRESUPUESTOS</p>
         <h1>Perfil del Taller</h1>
-        <p class="subtitle">Configurá los datos fiscales, de contacto y el logo oficial que se incluyen automáticamente en todos los presupuestos PDF y envíos por WhatsApp.</p>
+        <p class="subtitle">Configurá los datos comerciales, de contacto y el logo oficial que se incluyen automáticamente en todos los presupuestos en PDF y mensajes de WhatsApp.</p>
       </div>
       <button type="button" class="button secondary" id="backFromProfileBtn">← Volver a Trabajos</button>
     </div>
@@ -957,16 +1196,16 @@ export async function renderProfileScreen() {
 
     ${
       !canEdit
-        ? `<div class="notice">Tu rol actual en este taller es <b>${esc(ROLE_LABELS[activeMembership.role] || activeMembership.role)}</b>. Podés visualizar los datos del taller, pero solo el Propietario (Owner) o Administrador pueden modificarlos.</div>`
+        ? `<div class="notice">Tu rol actual en este taller es <b>${esc(ROLE_LABELS[activeMembership.role] || activeMembership.role)}</b>. Podés consultar los datos del taller, pero solo el Propietario o Administrador pueden modificarlos.</div>`
         : ''
     }
 
     <div class="admin-grid">
       <!-- Columna 1: Formulario de Datos del Taller + Logo -->
       <div class="admin-card">
-        <span class="eyebrow">DATOS DEL TALLER EN SUPABASE</span>
+        <span class="eyebrow">DATOS DEL TALLER</span>
         <h2>Información comercial y de contacto</h2>
-        <p class="subtitle">Asociado al taller ID <code>${esc(ws.id.slice(0, 8))}…</code></p>
+        <p class="subtitle">Estos datos identifican a tu taller frente a cada cliente.</p>
 
         <div class="logo-uploader" style="margin:16px 0">
           <div class="logo-preview-box" id="logoPreviewContainer">
@@ -978,7 +1217,7 @@ export async function renderProfileScreen() {
           </div>
           <div style="flex:1;min-width:210px">
             <h3 style="margin-bottom:4px">Logo del taller</h3>
-            <p class="small muted" style="margin:0 0 10px">Bucket privado <code>workshop-logos</code> en Supabase Storage. Formatos PNG, JPEG o WEBP (máx. 2 MB).</p>
+            <p class="small muted" style="margin:0 0 10px">Se mostrará en el encabezado de tus presupuestos. Formatos admitidos: PNG, JPEG o WEBP (máximo 2 MB).</p>
             ${
               canEdit
                 ? `<div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -1004,8 +1243,8 @@ export async function renderProfileScreen() {
           <label>Razón social
             <input id="profLegalName" maxlength="120" value="${esc(ws.legal_name || '')}" ${!canEdit ? 'disabled' : ''} placeholder="Ej. Crash Solution S.R.L.">
           </label>
-          <label>CUIT (con validación Módulo 11)
-            <input id="profTaxId" maxlength="15" value="${esc(ws.tax_id || '')}" ${!canEdit ? 'disabled' : ''} placeholder="Ej. 30-71234567-9">
+          <label>CUIT
+            <input id="profTaxId" maxlength="15" value="${esc(ws.tax_id || '')}" ${!canEdit ? 'disabled' : ''} placeholder="Ej. 30-71234567-1">
           </label>
           <label>Teléfono fijo / principal
             <input id="profPhone" type="tel" maxlength="40" value="${esc(ws.phone || '')}" ${!canEdit ? 'disabled' : ''} placeholder="Ej. 011 4555-1234">
@@ -1022,7 +1261,7 @@ export async function renderProfileScreen() {
           ${
             canEdit
               ? `<div class="span-two" style="margin-top:6px">
-                  <button type="submit" class="button primary" id="saveProfileBtn" style="width:100%">Guardar perfil del taller en Supabase</button>
+                  <button type="submit" class="button primary" id="saveProfileBtn" style="width:100%">Guardar datos del taller</button>
                 </div>`
               : ''
           }
@@ -1031,31 +1270,31 @@ export async function renderProfileScreen() {
 
       <!-- Columna 2: Vista previa en tiempo real para PDF + Respaldo -->
       <div class="admin-card">
-        <span class="eyebrow">VISTA PREVIA EN DOCUMENTOS PDF</span>
+        <span class="eyebrow">VISTA PREVIA DEL ENCABEZADO</span>
         <h2>Encabezado automático de presupuestos</h2>
-        <p class="subtitle">Así se verá el encabezado en todos los PDF emitidos por la aplicación para este taller.</p>
+        <p class="subtitle">Así se verá el encabezado en todos los presupuestos emitidos por tu taller.</p>
 
         <div class="budget-header-preview" id="liveBudgetHeaderPreview" style="margin:16px 0">
           ${previewHeaderHtml}
         </div>
 
         <details class="quiet-details" open>
-          <summary>Datos utilizados automáticamente en presupuestos</summary>
+          <summary>Datos incluidos automáticamente en cada presupuesto</summary>
           <ul class="small muted" style="line-height:1.7;padding-left:18px;margin:8px 0">
-            <li><b>Nombre comercial y Razón social:</b> encabezan el PDF y el mensaje de WhatsApp.</li>
-            <li><b>CUIT:</b> se imprime debajo de la razón social con formato oficial <code>XX-XXXXXXXX-X</code>.</li>
-            <li><b>Logo del taller:</b> se descarga de forma segura desde el bucket privado <code>workshop-logos</code> y se incrusta en el PDF.</li>
-            <li><b>Teléfono, WhatsApp, Correo y Dirección:</b> figuran como canales de contacto directo del taller en el presupuesto.</li>
+            <li><b>Nombre comercial y Razón social:</b> encabezan el PDF y el resumen de WhatsApp.</li>
+            <li><b>CUIT:</b> se muestra debajo de la razón social con formato oficial.</li>
+            <li><b>Logo del taller:</b> se incorpora automáticamente en la esquina superior del presupuesto.</li>
+            <li><b>Teléfono, WhatsApp, Correo y Dirección:</b> figuran como canales de contacto directo para el cliente.</li>
           </ul>
         </details>
 
         <details class="quiet-details">
-          <summary>Respaldo local JSON (Exportar / Importar)</summary>
-          <p class="muted small">Descargá una copia de respaldo de los trabajos o importá un archivo JSON existente.</p>
+          <summary>Copia de respaldo (Exportar / Importar)</summary>
+          <p class="muted small">Descargá una copia de seguridad de tus trabajos o restaurá un archivo guardado previamente.</p>
           <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px">
-            <button type="button" class="button secondary small-btn" id="profExportBackupBtn">Descargar respaldo JSON</button>
+            <button type="button" class="button secondary small-btn" id="profExportBackupBtn">Descargar copia de respaldo</button>
             <label class="button secondary small-btn" style="cursor:pointer">
-              Importar respaldo JSON
+              Importar copia de respaldo
               <input type="file" id="profImportBackupInput" accept=".json,application/json" hidden>
             </label>
           </div>
@@ -1121,7 +1360,7 @@ export async function renderProfileScreen() {
       activeMembership.workshop = ws
       await syncActiveWorkshopToLegacyStore()
       await renderProfileScreen()
-      setProfileAlert('success', 'Logo del taller actualizado y guardado en Supabase.')
+      setProfileAlert('success', 'Logo del taller actualizado correctamente.')
     } catch (err) {
       setProfileAlert('error', err.message || 'No se pudo subir el logo del taller.')
     } finally {
@@ -1154,7 +1393,7 @@ export async function renderProfileScreen() {
     setProfileAlert('', '')
     if (btn) {
       btn.disabled = true
-      btn.textContent = 'Guardando cambios en Supabase…'
+      btn.textContent = 'Guardando cambios…'
     }
     try {
       const updated = await updateWorkshopProfile(ws.id, {
@@ -1173,14 +1412,14 @@ export async function renderProfileScreen() {
       await syncActiveWorkshopToLegacyStore()
       renderHeaderNavigation()
       updateLivePreview()
-      setProfileAlert('success', 'Perfil del taller actualizado en Supabase correctamente.')
-      window.toast?.('Perfil del taller guardado en Supabase.')
+      setProfileAlert('success', 'Datos del taller actualizados correctamente.')
+      window.toast?.('Datos del taller guardados.')
     } catch (err) {
       setProfileAlert('error', err.message || 'No se pudo guardar el perfil del taller.')
     } finally {
       if (btn) {
         btn.disabled = false
-        btn.textContent = 'Guardar perfil del taller en Supabase'
+        btn.textContent = 'Guardar datos del taller'
       }
     }
   })
@@ -1226,6 +1465,7 @@ export async function openStockScreen() {
   if (profileScreen) profileScreen.hidden = true
   if (adminScreen) adminScreen.hidden = true
   if (stockScreen) stockScreen.hidden = false
+  persistCurrentNavigationState({ screen: 'stock' })
   renderHeaderNavigation()
   await renderStockScreen()
 }
@@ -1236,7 +1476,7 @@ export async function renderStockScreen() {
 
   const activeMembership = getActiveMembership()
   if (!activeMembership?.workshop) {
-    stockScreen.innerHTML = `<div class="notice">Seleccioná o creá un taller desde el panel <b>Admin (/admin)</b> para gestionar su stock.</div>`
+    stockScreen.innerHTML = `<div class="notice">Seleccioná o registrá un taller desde la sección <b>Administración</b> para gestionar su depósito.</div>`
     return
   }
 
@@ -1266,9 +1506,9 @@ export async function renderStockScreen() {
   stockScreen.innerHTML = `
     <div class="page-heading">
       <div>
-        <p class="eyebrow">INVENTARIO Y DEPÓSITO · DEV-22</p>
+        <p class="eyebrow">INVENTARIO Y DEPÓSITO</p>
         <h1>Stock de ${esc(ws.name)}</h1>
-        <p class="subtitle">Pinturas, materiales, insumos y repuestos con compatibilidad vehicular, alertas de stock mínimo y movimientos auditados vía RPC <code>record_stock_movement</code>.</p>
+        <p class="subtitle">Pinturas, materiales, insumos y repuestos con compatibilidad por vehículo, avisos de faltantes y registro completo de entradas y salidas.</p>
       </div>
       <div style="display:flex;gap:10px;flex-wrap:wrap">
         <button type="button" class="button primary" id="openNewStockItemBtn">+ Nuevo producto / repuesto</button>
@@ -1308,7 +1548,7 @@ export async function renderStockScreen() {
         : ''
     }
 
-    <!-- Panel de Registro de Movimiento de Stock (Exclusivo vía RPC record_stock_movement) -->
+    <!-- Panel de Registro de Movimiento de Stock -->
     <div id="stockMovementPanel" class="panel animate__animated animate__fadeIn" style="margin-bottom:22px;border-color:var(--blue)" ${
       movItem ? '' : 'hidden'
     }>
@@ -1317,9 +1557,9 @@ export async function renderStockScreen() {
           ? `
             <div class="piece-heading" style="margin-bottom:14px">
               <div>
-                <span class="eyebrow">MOVIMIENTO DE INVENTARIO (RPC RECORD_STOCK_MOVEMENT)</span>
-                <h2>${esc(movItem.name)} ${movItem.sku ? `<small class="muted">· SKU ${esc(movItem.sku)}</small>` : ''}</h2>
-                <p class="subtitle">Stock disponible actual: <b>${movItem.quantity} ${esc(movItem.unit || 'un.')}</b> · Stock mínimo: ${movItem.minimum_quantity} ${esc(movItem.unit || 'un.')}</p>
+                <span class="eyebrow">REGISTRO DE ENTRADA O SALIDA DE STOCK</span>
+                <h2>${esc(movItem.name)} ${movItem.sku ? `<small class="muted">· Código ${esc(movItem.sku)}</small>` : ''}</h2>
+                <p class="subtitle">Disponible actual: <b>${movItem.quantity} ${esc(movItem.unit || 'un.')}</b> · Stock mínimo: ${movItem.minimum_quantity} ${esc(movItem.unit || 'un.')}</p>
               </div>
               <button type="button" class="text-button" id="closeMovementPanelBtn">✕ Cerrar</button>
             </div>
@@ -1327,18 +1567,18 @@ export async function renderStockScreen() {
               <label>Tipo de operación <span class="required">*</span>
                 <select id="movDirection">
                   <option value="in">+ Ingreso a depósito (compra / devolución / ajuste +)</option>
-                  <option value="out">− Salida de depósito (consumo en OT / merma / ajuste −)</option>
+                  <option value="out">− Salida de depósito (uso en trabajo / merma / ajuste −)</option>
                 </select>
               </label>
               <label>Cantidad (${esc(movItem.unit || 'un.')}) <span class="required">*</span>
                 <input id="movQuantity" type="number" min="0.01" step="0.01" required placeholder="Ej. 2">
               </label>
               <label class="span-two">Motivo / Referencia de trabajo o proveedor <span class="required">*</span>
-                <input id="movReason" required maxlength="160" placeholder="Ej. Consumo en OT patente AB 123 CD / Factura Proveedor #0042">
+                <input id="movReason" required maxlength="160" placeholder="Ej. Uso en patente AB 123 CD / Compra a proveedor">
               </label>
               <div class="span-two" style="display:flex;justify-content:flex-end;gap:10px">
                 <button type="button" class="button secondary" id="cancelMovementBtn">Cancelar</button>
-                <button type="submit" class="button primary" id="submitMovementBtn">Confirmar movimiento en Supabase</button>
+                <button type="submit" class="button primary" id="submitMovementBtn">Confirmar movimiento</button>
               </div>
             </form>
           `
@@ -1370,7 +1610,7 @@ export async function renderStockScreen() {
           <label>Marca del producto
             <input id="stBrand" maxlength="80" value="${esc(editing?.brand || '')}" placeholder="Ej. PPG, 3M, Valeo, Fitam">
           </label>
-          <label>Código o SKU
+          <label>Código o referencia
             <input id="stSku" maxlength="60" class="plate-input" value="${esc(editing?.sku || '')}" placeholder="Ej. ESP-VW-204R">
           </label>
           <label>Unidad de medida
@@ -1389,23 +1629,23 @@ export async function renderStockScreen() {
           <label>Precio de venta (ARS)
             <input id="stSalePrice" type="number" min="0" step="0.01" value="${editing?.sale_price ?? 0}">
           </label>
-          <label>Stock mínimo (alerta)
+          <label>Stock mínimo (aviso de faltante)
             <input id="stMinQty" type="number" min="0" step="0.01" value="${editing?.minimum_quantity ?? 1}">
           </label>
           ${
             !editing?.id
-              ? `<label>Cantidad inicial (se registra vía <code>record_stock_movement</code>)
+              ? `<label>Cantidad inicial disponible
                   <input id="stInitialQty" type="number" min="0" step="0.01" value="0">
                 </label>`
-              : `<label>Cantidad disponible actual (modificar vía botón "± Movimiento")
+              : `<label>Cantidad disponible actual (usar botón "± Movimiento")
                   <input value="${editing.quantity} ${esc(editing.unit || 'un.')}" disabled>
                 </label>`
           }
-          <label class="span-two">Descripción técnica
+          <label class="span-two">Descripción
             <input id="stDescription" maxlength="240" value="${esc(editing?.description || '')}" placeholder="Ej. Espejo eléctrico con desempañador y luz de giro">
           </label>
           <label class="span-two">Observaciones
-            <textarea id="stNotes" rows="2" placeholder="Notas adicionales de almacenamiento o proveedor">${esc(editing?.notes || '')}</textarea>
+            <textarea id="stNotes" rows="2" placeholder="Notas adicionales de ubicación o proveedor">${esc(editing?.notes || '')}</textarea>
           </label>
         </div>
 
@@ -1422,7 +1662,7 @@ export async function renderStockScreen() {
         </div>
 
         <div class="form-footer">
-          <small>Las cantidades de inventario se auditan mediante <code>record_stock_movement</code>.</small>
+          <small>Cada ingreso o salida queda registrado en el historial del depósito.</small>
           <div style="display:flex;gap:10px;flex-wrap:wrap">
             ${
               editing
@@ -1440,8 +1680,8 @@ export async function renderStockScreen() {
     <!-- Barra de Búsqueda rápida y Filtros combinados -->
     <div class="stock-filters-panel">
       <div class="stock-filters-row">
-        <label>Búsqueda rápida (nombre, código SKU, ubicación, descripción)
-          <input id="stockSearchInput" type="search" value="${esc(f.search)}" placeholder="Buscar pintura, repuesto, SKU o estante…">
+        <label>Búsqueda rápida (nombre, código, ubicación, descripción)
+          <input id="stockSearchInput" type="search" value="${esc(f.search)}" placeholder="Buscar pintura, repuesto, código o estante…">
         </label>
         <label>Categoría
           <select id="stockCategoryFilter">
@@ -1485,9 +1725,9 @@ export async function renderStockScreen() {
     <div class="panel" style="margin-top:26px">
       <div class="piece-heading">
         <div>
-          <span class="eyebrow">TRAZABILIDAD DE INVENTARIO</span>
-          <h2>Historial de movimientos de stock (${appAuthState.stockMovements.length})</h2>
-          <p class="subtitle">Registro inmutable en <code>public.stock_movements</code> generado por <code>record_stock_movement</code>.</p>
+          <span class="eyebrow">HISTORIAL DEL DEPÓSITO</span>
+          <h2>Movimientos recientes de stock (${appAuthState.stockMovements.length})</h2>
+          <p class="subtitle">Detalle de ingresos, consumos y ajustes realizados en el taller.</p>
         </div>
       </div>
       <div id="stockMovementsContainer" class="movement-history-list"></div>
@@ -1548,7 +1788,7 @@ export async function renderStockScreen() {
     setStockAlert('', '')
     if (btn) {
       btn.disabled = true
-      btn.textContent = 'Ejecutando record_stock_movement…'
+      btn.textContent = 'Registrando movimiento…'
     }
     try {
       await recordStockMovement({
@@ -1566,7 +1806,7 @@ export async function renderStockScreen() {
     } finally {
       if (btn) {
         btn.disabled = false
-        btn.textContent = 'Confirmar movimiento en Supabase'
+        btn.textContent = 'Confirmar movimiento'
       }
     }
   })
@@ -1618,7 +1858,7 @@ export async function renderStockScreen() {
         appAuthState.editingStockItem = null
         appAuthState.draftCompatibilities = []
         await renderStockScreen()
-        setStockAlert('success', 'Producto y compatibilidad actualizados en Supabase.')
+        setStockAlert('success', 'Producto y compatibilidad actualizados correctamente.')
       } else {
         await createStockItem(ws.id, payload, appAuthState.draftCompatibilities)
         appAuthState.editingStockItem = null
@@ -1921,6 +2161,7 @@ export async function openAdminScreen() {
   if (profileScreen) profileScreen.hidden = true
   if (stockScreen) stockScreen.hidden = true
   if (adminScreen) adminScreen.hidden = false
+  persistCurrentNavigationState({ screen: 'admin' })
   renderHeaderNavigation()
   await renderAdminScreen()
 }
@@ -1955,9 +2196,9 @@ export async function renderAdminScreen() {
   adminScreen.innerHTML = `
     <div class="page-heading">
       <div>
-        <p class="eyebrow">ADMINISTRACIÓN Y ACCESOS · /ADMIN</p>
+        <p class="eyebrow">ADMINISTRACIÓN Y EQUIPO</p>
         <h1>Gestión de Talleres y Usuarios</h1>
-        <p class="subtitle">Controlá los talleres autorizados, sus miembros y sus roles (<code>owner</code>, <code>admin</code>, <code>staff</code>) validados en el servidor mediante Edge Function y políticas RLS.</p>
+        <p class="subtitle">Administrá los datos de tu taller, los integrantes de tu equipo y los permisos de acceso de cada usuario.</p>
       </div>
       ${
         appAuthState.memberships.length > 0
@@ -1974,7 +2215,7 @@ export async function renderAdminScreen() {
     ${
       !appAuthState.memberships.length
         ? `<div class="notice">
-            <b>Bienvenido/a a MiTallerApp.</b> Aún no tenés un taller asignado. Podés registrar tu primer taller a continuación (se te asignará automáticamente el rol <b>Propietario / Owner</b>) o compartir tu ID de usuario con el propietario/administrador de un taller existente.
+            <b>Bienvenido/a a MiTallerApp.</b> Aún no tenés un taller asignado. Podés registrar tu primer taller a continuación (quedarás asignado automáticamente como <b>Propietario</b>) o compartir tu código de usuario con el titular de un taller existente.
           </div>`
         : ''
     }
@@ -1983,8 +2224,8 @@ export async function renderAdminScreen() {
       <!-- Columna 1: Mis Talleres Autorizados + Alta de Taller -->
       <div class="admin-card">
         <span class="eyebrow">TALLERES</span>
-        <h2>Talleres autorizados (${appAuthState.memberships.length})</h2>
-        <p class="subtitle">Aislamiento por taller garantizado por Row Level Security (RLS).</p>
+        <h2>Mis talleres (${appAuthState.memberships.length})</h2>
+        <p class="subtitle">Cada taller mantiene sus propios trabajos, clientes, presupuestos y repuestos de forma independiente.</p>
 
         <div class="admin-list">
           ${
@@ -2024,7 +2265,7 @@ export async function renderAdminScreen() {
               <input id="newWsLegal" maxlength="120" placeholder="Ej. Crash Solution S.R.L.">
             </label>
             <label>CUIT
-              <input id="newWsCuit" maxlength="20" placeholder="Ej. 30-71234567-9">
+              <input id="newWsCuit" maxlength="20" placeholder="Ej. 30-71234567-1">
             </label>
             <label>Teléfono
               <input id="newWsPhone" type="tel" maxlength="40" placeholder="Ej. 11 4444 5555">
@@ -2039,31 +2280,31 @@ export async function renderAdminScreen() {
               <input id="newWsAddress" maxlength="160" placeholder="Av. Warnes 1234, CABA">
             </label>
             <div class="span-two">
-              <button type="submit" class="button primary" id="createWsSubmitBtn" style="width:100%">Registrar taller y asignarme como Propietario (Owner)</button>
+              <button type="submit" class="button primary" id="createWsSubmitBtn" style="width:100%">Registrar taller</button>
             </div>
           </form>
         </details>
 
         <div class="quiet-details">
-          <p class="small muted" style="margin:6px 0 4px"><b>Tu ID de usuario (UUID)</b> para que un propietario/administrador te asocie a su taller:</p>
+          <p class="small muted" style="margin:6px 0 4px"><b>Tu código de usuario</b> (compartilo si necesitás que el titular de otro taller te agregue a su equipo):</p>
           <div class="uuid-box">
             <span id="myUserUuidText">${esc(appAuthState.user?.id || '')}</span>
-            <button type="button" class="button secondary small-btn" id="copyMyUuidBtn">Copiar ID</button>
+            <button type="button" class="button secondary small-btn" id="copyMyUuidBtn">Copiar código</button>
           </div>
         </div>
       </div>
 
       <!-- Columna 2: Miembros y Roles del Taller Activo -->
       <div class="admin-card">
-        <span class="eyebrow">USUARIOS Y ROLES (OWNER · ADMIN · STAFF)</span>
-        <h2>${activeWorkshop ? `Equipo de ${esc(activeWorkshop.name)}` : 'Seleccioná o creá un taller'}</h2>
+        <span class="eyebrow">EQUIPO DEL TALLER Y PERMISOS</span>
+        <h2>${activeWorkshop ? `Equipo de ${esc(activeWorkshop.name)}` : 'Seleccioná o registrá un taller'}</h2>
         <p class="subtitle">
           ${
             !activeWorkshop
-              ? 'Una vez creado o seleccionado un taller podrás ver y administrar sus usuarios.'
+              ? 'Una vez registrado o seleccionado un taller podrás ver y organizar a los integrantes del equipo.'
               : isWorkshopAdmin
-                ? `Tu rol activo es "${esc(ROLE_LABELS[callerRole] || callerRole)}". Las altas, cambios de rol y bajas se ejecutan mediante la Edge Function segura "admin-management".`
-                : `Tu rol actual en este taller es "${esc(ROLE_LABELS[callerRole] || callerRole)}". Solo el Propietario (Owner) o Administrador pueden modificar miembros o roles.`
+                ? `Tu rol actual es "${esc(ROLE_LABELS[callerRole] || callerRole)}". Desde aquí podés invitar integrantes, asignar permisos o revocar accesos.`
+                : `Tu rol actual en este taller es "${esc(ROLE_LABELS[callerRole] || callerRole)}". Solo el Propietario o Administrador pueden modificar los permisos del equipo.`
           }
         </p>
 
@@ -2078,8 +2319,7 @@ export async function renderAdminScreen() {
                     <div class="admin-item">
                       <div class="admin-item-info">
                         <h4>${esc(mem.display_name)} ${mem.user_id === appAuthState.user?.id ? '<small class="muted">(Vos)</small>' : ''}</h4>
-                        <p>UUID: <code>${esc(mem.user_id)}</code></p>
-                        ${mem.phone ? `<p>Tel: ${esc(mem.phone)}</p>` : ''}
+                        ${mem.phone ? `<p>Tel: ${esc(mem.phone)}</p>` : `<p class="small muted">Integrante registrado</p>`}
                       </div>
                       <div class="admin-item-actions">
                         ${
@@ -2112,41 +2352,41 @@ export async function renderAdminScreen() {
                 isWorkshopAdmin
                   ? `
                     <details class="quiet-details" open>
-                      <summary>+ Asociar usuario existente al taller (vía Edge Function)</summary>
+                      <summary>+ Agregar usuario existente al equipo</summary>
                       <form id="assignMemberForm" class="form-grid" style="margin-top:12px">
                         ${
                           appAuthState.knownProfiles.length
-                            ? `<label class="span-two">Seleccionar de perfiles registrados (opcional)
+                            ? `<label class="span-two">Seleccionar usuario registrado (opcional)
                                 <select id="knownProfileSelect">
-                                  <option value="">— Elegir usuario registrado o ingresar UUID abajo —</option>
+                                  <option value="">— Elegir usuario o ingresar su código abajo —</option>
                                   ${appAuthState.knownProfiles
                                     .map(
                                       p =>
-                                        `<option value="${esc(p.user_id)}">${esc(p.display_name || 'Sin nombre')} (${esc(p.user_id.slice(0, 8))}…)</option>`
+                                        `<option value="${esc(p.user_id)}">${esc(p.display_name || 'Sin nombre')}</option>`
                                     )
                                     .join('')}
                                 </select>
                               </label>`
                             : ''
                         }
-                        <label>ID de Usuario (UUID) <span class="required">*</span>
-                          <input id="assignUserUuid" required placeholder="00000000-0000-0000-0000-000000000000">
+                        <label>Código de usuario <span class="required">*</span>
+                          <input id="assignUserUuid" required placeholder="Pegá aquí el código del usuario">
                         </label>
-                        <label>Rol en el taller <span class="required">*</span>
+                        <label>Permiso en el taller <span class="required">*</span>
                           <select id="assignUserRole">
-                            <option value="staff">Personal / Staff (staff)</option>
-                            <option value="admin">Administrador (admin)</option>
-                            ${isCallerOwner ? `<option value="owner">Propietario (owner)</option>` : ''}
+                            <option value="staff">Personal del taller</option>
+                            <option value="admin">Administrador</option>
+                            ${isCallerOwner ? `<option value="owner">Propietario</option>` : ''}
                           </select>
                         </label>
                         <div class="span-two">
-                          <button type="submit" class="button secondary" id="assignMemberBtn" style="width:100%">Asociar usuario a ${esc(activeWorkshop.name)}</button>
+                          <button type="submit" class="button secondary" id="assignMemberBtn" style="width:100%">Agregar al equipo de ${esc(activeWorkshop.name)}</button>
                         </div>
                       </form>
                     </details>
 
                     <details class="quiet-details">
-                      <summary>+ Invitar nuevo usuario por correo electrónico (vía Edge Function)</summary>
+                      <summary>+ Invitar nuevo integrante por correo electrónico</summary>
                       <form id="inviteUserForm" class="form-grid" style="margin-top:12px">
                         <label>Nombre y apellido <span class="required">*</span>
                           <input id="invName" required placeholder="Ej. Carlos Gómez">
@@ -2157,18 +2397,18 @@ export async function renderAdminScreen() {
                         <label>Correo electrónico <span class="required">*</span>
                           <input id="invEmail" type="email" required placeholder="carlos@taller.com">
                         </label>
-                        <label>Rol asignado <span class="required">*</span>
+                        <label>Permiso asignado <span class="required">*</span>
                           <select id="invRole">
-                            <option value="staff">Personal / Staff (staff)</option>
-                            <option value="admin">Administrador (admin)</option>
-                            ${isCallerOwner ? `<option value="owner">Propietario (owner)</option>` : ''}
+                            <option value="staff">Personal del taller</option>
+                            <option value="admin">Administrador</option>
+                            ${isCallerOwner ? `<option value="owner">Propietario</option>` : ''}
                           </select>
                         </label>
                         <p class="small muted span-two" style="margin:0">
-                          Por seguridad, no se ingresan contraseñas de terceros: el usuario recibirá un correo de invitación oficial de Supabase para definir su propia contraseña.
+                          El integrante recibirá un correo electrónico de invitación para definir su propia contraseña e ingresar al taller.
                         </p>
                         <div class="span-two">
-                          <button type="submit" class="button primary" id="inviteUserBtn" style="width:100%">Enviar invitación por correo y vincular al taller</button>
+                          <button type="submit" class="button primary" id="inviteUserBtn" style="width:100%">Enviar invitación por correo</button>
                         </div>
                       </form>
                     </details>
@@ -2196,7 +2436,7 @@ export async function renderAdminScreen() {
   document.getElementById('copyMyUuidBtn')?.addEventListener('click', () => {
     if (appAuthState.user?.id) {
       navigator.clipboard?.writeText(appAuthState.user.id)
-      window.toast?.('ID de usuario copiado al portapapeles.')
+      window.toast?.('Código de usuario copiado al portapapeles.')
     }
   })
 
@@ -2235,7 +2475,7 @@ export async function renderAdminScreen() {
       await loadWorkshopJobsFromSupabase()
       renderHeaderNavigation()
       await renderAdminScreen()
-      setAdminAlert('success', `Taller "${ws.name}" creado y asociado a tu cuenta como Propietario (Owner).`)
+      setAdminAlert('success', `Taller "${ws.name}" registrado y asociado a tu cuenta como Propietario.`)
     } catch (err) {
       setAdminAlert('error', err.message || 'No se pudo crear el taller.')
     } finally {
@@ -2359,6 +2599,7 @@ async function handleExpiredSession() {
   appAuthState.profile = null
   appAuthState.memberships = []
   appAuthState.activeWorkshopProfile = null
+  appAuthState.isSessionBootstrapped = false
   await enforceRouteProtection('Tu sesión expiró por seguridad. Volvé a iniciar sesión para continuar.')
 }
 
@@ -2404,11 +2645,15 @@ export async function enforceRouteProtection(expiredMessage = '') {
   } else if (wantsStock) {
     await openStockScreen()
   } else {
-    if (adminScreen) adminScreen.hidden = true
-    if (profileScreen) profileScreen.hidden = true
-    if (stockScreen) stockScreen.hidden = true
-    window.showJobs?.()
-    renderHeaderNavigation()
+    const restored = await restoreSavedNavigationState()
+    if (!restored) {
+      if (adminScreen) adminScreen.hidden = true
+      if (profileScreen) profileScreen.hidden = true
+      if (stockScreen) stockScreen.hidden = true
+      window.showJobs?.()
+      persistCurrentNavigationState({ screen: 'jobs', activeJobId: null })
+      renderHeaderNavigation()
+    }
   }
 }
 
@@ -2417,6 +2662,7 @@ async function onSessionEstablished(session) {
   appAuthState.user = session?.user || null
 
   if (!appAuthState.user) {
+    appAuthState.isSessionBootstrapped = false
     await enforceRouteProtection()
     return
   }
@@ -2438,6 +2684,7 @@ async function onSessionEstablished(session) {
 
     await syncActiveWorkshopToLegacyStore()
     await loadWorkshopJobsFromSupabase()
+    appAuthState.isSessionBootstrapped = true
   } catch (err) {
     console.warn('Error inicializando perfil y talleres del usuario:', err)
   }
@@ -2465,7 +2712,171 @@ function getCurrentWorkshopForBudget() {
   }
 }
 
+function restorePieceDomStateAfterRender() {
+  const openKeys = new Set(appAuthState.openPieceDetailsKeys || [])
+  if (appAuthState.activePieceKey) {
+    openKeys.add(appAuthState.activePieceKey)
+  }
+
+  document.querySelectorAll('details.damage-details[data-piece-details]').forEach(detailsEl => {
+    const key = detailsEl.getAttribute('data-piece-details')
+    if (key && openKeys.has(key)) {
+      detailsEl.open = true
+    }
+    if (!detailsEl.__navToggleBound) {
+      detailsEl.__navToggleBound = true
+      detailsEl.addEventListener('toggle', () => {
+        if (detailsEl.open && key) {
+          appAuthState.activePieceKey = key
+        }
+        persistCurrentNavigationState()
+      })
+    }
+  })
+
+  if (appAuthState.activePieceKey) {
+    document.querySelectorAll('.piece-item[data-piece-card]').forEach(cardEl => {
+      const key = cardEl.getAttribute('data-piece-card')
+      cardEl.classList.toggle('active-piece-focus', key === appAuthState.activePieceKey)
+    })
+  }
+}
+
+function wireNavigationPersistence() {
+  if (window.__navPersistenceWrapped) return
+  window.__navPersistenceWrapped = true
+
+  const origShowJobs = window.showJobs
+  if (typeof origShowJobs === 'function') {
+    window.showJobs = function (...args) {
+      const res = origShowJobs.apply(this, args)
+      persistCurrentNavigationState({ screen: 'jobs', activeJobId: null })
+      return res
+    }
+  }
+
+  const origOpenJob = window.openJob
+  if (typeof origOpenJob === 'function') {
+    window.openJob = function (id, step = 'reception') {
+      appAuthState.activePieceKey = null
+      appAuthState.openPieceDetailsKeys = []
+      const res = origOpenJob.call(this, id, step)
+      persistCurrentNavigationState({
+        screen: 'work',
+        activeJobId: id || window.active?.id || null,
+        step: window.step || step || 'reception',
+        area: window.active?.area || 'Parte delantera',
+        page: Number(window.page || 0),
+        activePieceKey: null,
+        openPieceDetailsKeys: []
+      })
+      return res
+    }
+  }
+
+  const origShowStep = window.showStep
+  if (typeof origShowStep === 'function') {
+    window.showStep = function (next, validate = true) {
+      const res = origShowStep.call(this, next, validate)
+      persistCurrentNavigationState({
+        screen: 'work',
+        step: window.step || next
+      })
+      return res
+    }
+  }
+
+  const origSelectZone = window.selectZone
+  if (typeof origSelectZone === 'function') {
+    window.selectZone = function (zone) {
+      appAuthState.activePieceKey = null
+      appAuthState.openPieceDetailsKeys = []
+      const res = origSelectZone.call(this, zone)
+      persistCurrentNavigationState({
+        screen: 'work',
+        step: 'inspection',
+        area: zone,
+        page: 0,
+        activePieceKey: null,
+        openPieceDetailsKeys: []
+      })
+      return res
+    }
+  }
+
+  const origChangePage = window.changePage
+  if (typeof origChangePage === 'function') {
+    window.changePage = function (delta) {
+      const res = origChangePage.call(this, delta)
+      persistCurrentNavigationState({
+        screen: 'work',
+        step: 'inspection',
+        page: Number(window.page || 0)
+      })
+      return res
+    }
+  }
+
+  const origRenderInspection = window.renderInspection
+  if (typeof origRenderInspection === 'function') {
+    window.renderInspection = function (...args) {
+      const res = origRenderInspection.apply(this, args)
+      restorePieceDomStateAfterRender()
+      return res
+    }
+  }
+
+  const pieceListEl = document.getElementById('pieceList')
+  if (pieceListEl && !pieceListEl.__navListenerBound) {
+    pieceListEl.__navListenerBound = true
+    const recordPieceInteraction = e => {
+      const pieceEl = e.target?.closest?.('[data-piece-card]')
+      const key =
+        pieceEl?.getAttribute('data-piece-card') ||
+        e.target?.getAttribute?.('data-mark') ||
+        e.target?.getAttribute?.('data-work') ||
+        e.target?.getAttribute?.('data-note')
+      if (key) {
+        appAuthState.activePieceKey = key
+        persistCurrentNavigationState({ activePieceKey: key })
+      }
+    }
+    pieceListEl.addEventListener('click', recordPieceInteraction)
+    pieceListEl.addEventListener('input', recordPieceInteraction)
+    pieceListEl.addEventListener('focusin', recordPieceInteraction)
+  }
+
+  const mapDisclosureEl = document.getElementById('mapDisclosure')
+  if (mapDisclosureEl && !mapDisclosureEl.__navListenerBound) {
+    mapDisclosureEl.__navListenerBound = true
+    mapDisclosureEl.addEventListener('toggle', () => {
+      persistCurrentNavigationState({ mapOpen: Boolean(mapDisclosureEl.open) })
+    })
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && appAuthState.user?.id) {
+      persistCurrentNavigationState()
+    }
+  })
+
+  let scrollTimer = null
+  window.addEventListener(
+    'scroll',
+    () => {
+      if (!appAuthState.user?.id) return
+      clearTimeout(scrollTimer)
+      scrollTimer = setTimeout(() => {
+        persistCurrentNavigationState({ scrollY: Math.round(window.scrollY || 0) })
+      }, 250)
+    },
+    { passive: true }
+  )
+}
+
 function wireEnhancedBudgetAndSettings() {
+  wireNavigationPersistence()
+
   // DEV-25: Opción A — Compartir presupuesto como mensaje de texto por WhatsApp (sin afirmar que fue enviado si solo se abrió WhatsApp)
   if (!window.__dev25WhatsappWrapped) {
     window.__dev25WhatsappWrapped = true
@@ -2561,8 +2972,8 @@ function wireEnhancedBudgetAndSettings() {
             </div>
             <div>
               <h3>Vehículo</h3>
-              <p><b>${esc((j.rec.patente || '').toUpperCase())}</b></p>
-              <p>${esc([j.rec.marca, j.rec.modelo, j.rec.anio].filter(Boolean).join(' '))}</p>
+              <p><b>${esc([j.rec.marca, j.rec.modelo].filter(Boolean).join(' '))}${j.rec.anio ? ` (${esc(j.rec.anio)})` : ''}</b></p>
+              <p>Patente: <b>${esc((j.rec.patente || '').toUpperCase())}</b>${j.rec.anio ? ` · Año: <b>${esc(j.rec.anio)}</b>` : ''}</p>
               <p>${j.rec.km ? `Kilometraje: ${esc(j.rec.km)} km` : ''}</p>
             </div>
           </div>
@@ -2583,7 +2994,7 @@ function wireEnhancedBudgetAndSettings() {
           </table>
           <div class="pdf-total">
             <div><span>Subtotal</span><b>${window.money(t.subtotal)}</b></div>
-            ${t.discount ? `<div><span>Descuento</span><b>− ${window.money(t.discount)}</b></div>` : ''}
+            ${t.discount ? `<div><span>Descuento</span><b>- ${window.money(t.discount)}</b></div>` : ''}
             ${t.tax ? `<div><span>Impuesto</span><b>${window.money(t.tax)}</b></div>` : ''}
             <div class="pdf-grand"><span>Total</span><b>${window.money(t.total)}</b></div>
           </div>
@@ -2680,6 +3091,7 @@ export async function initAuthAndAdmin() {
         userId: prevUserId,
         workshopId: activeMembership?.workshop_id || null
       })
+      clearNavigationState()
       if (window.store) {
         window.store.jobs = []
         window.store.activeId = null
@@ -2690,13 +3102,26 @@ export async function initAuthAndAdmin() {
       appAuthState.profile = null
       appAuthState.memberships = []
       appAuthState.activeWorkshopProfile = null
+      appAuthState.isSessionBootstrapped = false
       appAuthState.pendingSyncCount = 0
       appAuthState.unresolvedConflicts = []
+      appAuthState.activePieceKey = null
+      appAuthState.openPieceDetailsKeys = []
       await enforceRouteProtection()
       return
     }
     if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
-      await onSessionEstablished(session)
+      const shouldReinit = shouldReinitializeOnAuthEvent({
+        event,
+        previousUserId: appAuthState.user?.id || null,
+        nextUserId: session?.user?.id || null,
+        isInitialized: appAuthState.isSessionBootstrapped
+      })
+      appAuthState.session = session
+      appAuthState.user = session?.user || appAuthState.user
+      if (shouldReinit) {
+        await onSessionEstablished(session)
+      }
     }
   })
 

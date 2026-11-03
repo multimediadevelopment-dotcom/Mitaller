@@ -4,9 +4,9 @@ import { supabase, isSupabaseConfigured } from './supabase.js'
 export const VALID_WORKSHOP_ROLES = ['owner', 'admin', 'staff']
 
 export const ROLE_LABELS = {
-  owner: 'Propietario (Owner)',
-  admin: 'Administrador (Admin)',
-  staff: 'Personal (Staff)'
+  owner: 'Propietario',
+  admin: 'Administrador',
+  staff: 'Personal del taller'
 }
 
 export function validateEmail(email) {
@@ -82,7 +82,7 @@ export function preventSelfPrivilegeEscalation({
   if (!VALID_WORKSHOP_ROLES.includes(normalizedRequested)) {
     return {
       allowed: false,
-      error: 'Rol inválido. Los únicos roles permitidos son: owner, admin, staff.'
+      error: 'Rol inválido. Seleccioná Propietario, Administrador o Personal del taller.'
     }
   }
 
@@ -97,7 +97,7 @@ export function preventSelfPrivilegeEscalation({
   if (normalizedCaller !== 'owner' && normalizedRequested === 'owner') {
     return {
       allowed: false,
-      error: 'No está permitido asignarse u otorgar el rol de propietario (owner) sin ser propietario.'
+      error: 'No está permitido asignarse u otorgar el rol de propietario sin ser propietario del taller.'
     }
   }
 
@@ -105,7 +105,7 @@ export function preventSelfPrivilegeEscalation({
   if (normalizedCaller !== 'owner' && normalizedTargetCurrent === 'owner') {
     return {
       allowed: false,
-      error: 'Un administrador no puede modificar los permisos de un propietario (owner).'
+      error: 'Un administrador no puede modificar los permisos de un propietario del taller.'
     }
   }
 
@@ -228,43 +228,69 @@ export async function signInWithEmail(email, password) {
   return data
 }
 
-export async function signUpWithEmail({ email, password, confirmPassword, displayName, phone }) {
-  if (!isSupabaseConfigured || !supabase) {
-    throw new Error('Supabase no está configurado.')
+export async function signUpWithEmail(
+  { email, password, confirmPassword, displayName, phone },
+  client = supabase
+) {
+  if (!client) {
+    throw new Error('El servicio de autenticación no está configurado.')
   }
   const check = validateRegistration({ email, password, confirmPassword, displayName })
   if (!check.valid) throw new Error(check.error)
+
+  const cleanEmail = String(email).trim().toLowerCase()
+  const cleanName = String(displayName).trim()
+  const cleanPhone = String(phone || '').trim() || null
 
   const redirectTo =
     typeof window !== 'undefined'
       ? `${window.location.origin}${window.location.pathname}`
       : undefined
 
-  const { data, error } = await supabase.auth.signUp({
-    email: String(email).trim().toLowerCase(),
+  const { data, error } = await client.auth.signUp({
+    email: cleanEmail,
     password: String(password),
     options: {
       emailRedirectTo: redirectTo,
       data: {
-        display_name: String(displayName).trim(),
-        phone: String(phone || '').trim() || null
+        display_name: cleanName,
+        phone: cleanPhone
       }
     }
   })
 
   if (error) throw new Error(translateAuthError(error))
 
-  if (data.user && data.session) {
-    await ensureUserProfile(data.user, {
-      displayName: String(displayName).trim(),
-      phone: String(phone || '').trim() || null
+  let user = data?.user || null
+  let session = data?.session || null
+
+  // Si Supabase creó el usuario pero aún no adjuntó la sesión en la respuesta de signUp,
+  // intentamos iniciar sesión de inmediato con las credenciales recién registradas.
+  if (user && !session && typeof client.auth.signInWithPassword === 'function') {
+    const signInAttempt = await client.auth
+      .signInWithPassword({
+        email: cleanEmail,
+        password: String(password)
+      })
+      .catch(() => null)
+
+    if (signInAttempt?.data?.session) {
+      session = signInAttempt.data.session
+      user = signInAttempt.data.user || user
+    }
+  }
+
+  if (user && session) {
+    await ensureUserProfile(user, {
+      displayName: cleanName,
+      phone: cleanPhone
     }).catch(() => null)
   }
 
   return {
-    user: data.user,
-    session: data.session,
-    requiresEmailConfirmation: Boolean(data.user && !data.session)
+    user,
+    session,
+    requiresEmailConfirmation: Boolean(user && !session)
   }
 }
 

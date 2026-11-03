@@ -9,7 +9,15 @@ export function formatArsCurrency(value) {
     style: 'currency',
     currency: 'ARS',
     maximumFractionDigits: 2
-  }).format(toSafeNumber(value))
+  })
+    .format(toSafeNumber(value))
+    .replace(/[\u00A0\u202F]/g, ' ')
+}
+
+export function getVehicleYear(rec = {}) {
+  if (!rec || typeof rec !== 'object') return ''
+  const raw = rec.anio ?? rec['año'] ?? rec.year ?? ''
+  return String(raw).trim()
 }
 
 export function formatIsoDateAr(isoDate) {
@@ -109,21 +117,27 @@ export function buildBudgetWhatsappMessage(job = {}, shop = {}) {
   const legalName = String(shop?.legal_name || '').trim()
   const cuit = shop?.tax_id ? formatCuit(shop.tax_id) : ''
   const contactParts = [
-    shop?.phone ? `Tel: ${shop.phone}` : '',
-    shop?.whatsapp ? `WhatsApp: ${shop.whatsapp}` : '',
-    shop?.address || '',
-    shop?.email || ''
+    shop?.phone ? `Tel: ${String(shop.phone).trim()}` : '',
+    shop?.whatsapp ? `WhatsApp: ${String(shop.whatsapp).trim()}` : '',
+    shop?.address ? String(shop.address).trim() : '',
+    shop?.email ? String(shop.email).trim() : ''
   ].filter(Boolean)
 
   const quoteRef = String(job?.number || '').startsWith('LOCAL-')
     ? `Ref. ${String(job?.id || '').slice(0, 8).toUpperCase()}`
-    : String(job?.number || 'S/N')
+    : String(job?.number || 'S/N').trim()
+
+  const yearStr = getVehicleYear(job?.rec)
+  const plateStr = String(job?.rec?.patente || '').trim().toUpperCase()
+  const makeModelStr = [job?.rec?.marca, job?.rec?.modelo]
+    .map(v => String(v || '').trim())
+    .filter(Boolean)
+    .join(' ')
 
   const vehicleLabel = [
-    job?.rec?.marca,
-    job?.rec?.modelo,
-    job?.rec?.anio,
-    job?.rec?.patente ? `(${String(job.rec.patente).toUpperCase()})` : ''
+    makeModelStr,
+    yearStr,
+    plateStr ? `(${plateStr})` : ''
   ]
     .filter(Boolean)
     .join(' ')
@@ -138,24 +152,31 @@ export function buildBudgetWhatsappMessage(job = {}, shop = {}) {
       const qty = toSafeNumber(q.qty)
       const unitPrice = toSafeNumber(q.price)
       const lineTotal = qty * unitPrice
+      const desc = String(q.description || '').replace(/\s+/g, ' ').trim()
       const qtyLabel = qty !== 1 ? ` (${qty} x ${formatArsCurrency(unitPrice)})` : ''
-      return `• ${String(q.description || '').trim()}${qtyLabel}: ${formatArsCurrency(lineTotal)}`
+      return `- ${desc}${qtyLabel}: ${formatArsCurrency(lineTotal)}`
     })
     .join('\n')
 
-  const headerLines = [`*${shopName} · Presupuesto ${quoteRef}*`]
+  const headerLines = [`*${shopName} - Presupuesto ${quoteRef}*`]
   if (legalName || cuit) {
-    headerLines.push([legalName, cuit ? `CUIT ${cuit}` : ''].filter(Boolean).join(' · '))
+    headerLines.push([legalName, cuit ? `CUIT ${cuit}` : ''].filter(Boolean).join(' | '))
   }
   if (contactParts.length) {
-    headerLines.push(contactParts.join(' · '))
+    headerLines.push(contactParts.join(' | '))
   }
+
+  const clientBlock = [
+    `*Cliente:* ${String(job?.rec?.cliente || 'Sin especificar').replace(/\s+/g, ' ').trim()}`,
+    `*Vehículo:* ${vehicleLabel || 'Sin especificar'}`,
+    yearStr ? `*Año:* ${yearStr}` : '',
+    plateStr ? `*Patente:* ${plateStr}` : '',
+    job?.rec?.km ? `*Kilometraje:* ${String(job.rec.km).trim()} km` : ''
+  ].filter(Boolean)
 
   const sections = [
     headerLines.join('\n'),
-    `👤 *Cliente:* ${String(job?.rec?.cliente || 'Sin especificar').trim()}\n🚗 *Vehículo:* ${vehicleLabel || 'Sin especificar'}${
-      job?.rec?.km ? ` · ${job.rec.km} km` : ''
-    }`,
+    clientBlock.join('\n'),
     `*Detalle de trabajos y repuestos:*\n${linesText}`
   ]
 
@@ -164,7 +185,7 @@ export function buildBudgetWhatsappMessage(job = {}, shop = {}) {
     totalsLines.push(`Subtotal: ${formatArsCurrency(t.subtotal)}`)
   }
   if (t.discount > 0) {
-    totalsLines.push(`Descuento (${t.discountPct}%): − ${formatArsCurrency(t.discount)}`)
+    totalsLines.push(`Descuento (${t.discountPct}%): - ${formatArsCurrency(t.discount)}`)
   }
   if (t.tax > 0) {
     totalsLines.push(`Impuestos (${t.taxPct}%): + ${formatArsCurrency(t.tax)}`)
@@ -172,14 +193,23 @@ export function buildBudgetWhatsappMessage(job = {}, shop = {}) {
   totalsLines.push(`*TOTAL PRESUPUESTADO: ${formatArsCurrency(t.total)}*`)
   sections.push(totalsLines.join('\n'))
 
-  const metaLines = [`📅 Fecha: ${issueDate} · Válido hasta: ${validUntil}`]
+  const metaLines = [`Fecha: ${issueDate} | Válido hasta: ${validUntil}`]
   if (doc.terms && String(doc.terms).trim()) {
-    metaLines.push(`📋 *Observaciones / Condiciones:*\n${String(doc.terms).trim()}`)
+    const cleanTerms = String(doc.terms)
+      .split(/\r?\n/)
+      .map(line => line.replace(/[\t\u00A0\u202F]+/g, ' ').replace(/ {2,}/g, ' ').trim())
+      .filter(Boolean)
+      .join('\n')
+    metaLines.push(`*Observaciones / Condiciones:*\n${cleanTerms}`)
   }
   metaLines.push('_Presupuesto estimativo sujeto al alcance indicado. No válido como factura._')
   sections.push(metaLines.join('\n'))
 
-  return sections.join('\n\n')
+  return sections
+    .join('\n\n')
+    .replace(/[\t\u00A0\u202F]+/g, ' ')
+    .replace(/\uFFFD/g, '')
+    .normalize('NFC')
 }
 
 export function buildWhatsappShareUrl(job = {}, shop = {}) {
@@ -327,7 +357,7 @@ export function createBudgetJsPdfDocument(job = {}, shop = {}) {
   y += 6
 
   // 2. Bloques de Cliente y Vehículo
-  const boxHeight = 26
+  const boxHeight = 31
   const colWidth = (contentWidth - 6) / 2
 
   doc.setFillColor(244, 247, 251)
@@ -350,36 +380,63 @@ export function createBudgetJsPdfDocument(job = {}, shop = {}) {
   doc.setFont('helvetica', 'normal')
   doc.setFontSize(8.8)
   doc.setTextColor(65, 84, 104)
+  let clientY = y + 16
   if (job?.rec?.telefono) {
-    doc.text(`WhatsApp / Tel: ${job.rec.telefono}`, margin + 4, y + 16)
+    doc.text(`WhatsApp / Tel: ${job.rec.telefono}`, margin + 4, clientY)
+    clientY += 4.8
   }
   const clientAddress = [job?.rec?.direccion, job?.rec?.localidad].filter(Boolean).join(', ')
   if (clientAddress) {
-    doc.text(clientAddress.slice(0, 52), margin + 4, y + 21)
+    doc.text(clientAddress.slice(0, 52), margin + 4, clientY)
   }
 
-  // Datos del Vehículo
+  // Datos del Vehículo (Marca y modelo, Año, Patente, Kilometraje, Motivo)
   const vehX = margin + colWidth + 10
   doc.setFont('helvetica', 'bold')
   doc.setFontSize(8)
   doc.setTextColor(113, 130, 149)
   doc.text('VEHÍCULO', vehX, y + 5.5)
 
+  const plateText = String(job?.rec?.patente || '').trim().toUpperCase()
+  const yearText = getVehicleYear(job?.rec)
+  const makeModelOnly = [job?.rec?.marca, job?.rec?.modelo]
+    .map(v => String(v || '').trim())
+    .filter(Boolean)
+    .join(' ')
+
   doc.setFont('helvetica', 'bold')
-  doc.setFontSize(10.5)
+  doc.setFontSize(10.2)
   doc.setTextColor(19, 44, 67)
-  const plateText = String(job?.rec?.patente || '').toUpperCase()
-  const makeModel = [job?.rec?.marca, job?.rec?.modelo, job?.rec?.anio].filter(Boolean).join(' ')
-  doc.text([plateText, makeModel].filter(Boolean).join(' · ').slice(0, 48), vehX, y + 11)
+  const primaryVehicleLine = [
+    makeModelOnly || 'Vehículo',
+    yearText ? `(${yearText})` : '',
+    plateText ? `· ${plateText}` : ''
+  ]
+    .filter(Boolean)
+    .join(' ')
+  doc.text(primaryVehicleLine.slice(0, 52), vehX, y + 11)
 
   doc.setFont('helvetica', 'normal')
   doc.setFontSize(8.8)
   doc.setTextColor(65, 84, 104)
+  let vehY = y + 16
+
+  const plateAndYearLine = [
+    plateText ? `Patente: ${plateText}` : '',
+    yearText ? `Año: ${yearText}` : ''
+  ]
+    .filter(Boolean)
+    .join(' · ')
+  if (plateAndYearLine) {
+    doc.text(plateAndYearLine, vehX, vehY)
+    vehY += 4.6
+  }
   if (job?.rec?.km) {
-    doc.text(`Kilometraje: ${job.rec.km} km`, vehX, y + 16)
+    doc.text(`Kilometraje: ${String(job.rec.km).trim()} km`, vehX, vehY)
+    vehY += 4.6
   }
   if (job?.rec?.motivo) {
-    doc.text(`Ingreso: ${String(job.rec.motivo).slice(0, 50)}`, vehX, y + 21)
+    doc.text(`Ingreso: ${String(job.rec.motivo).slice(0, 48)}`, vehX, vehY)
   }
 
   y += boxHeight + 7

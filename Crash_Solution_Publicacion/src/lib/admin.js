@@ -27,11 +27,11 @@ export function validateMemberAssignment({
   const cleanUserId = String(targetUserId || '').trim()
   const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
   if (!uuidRegex.test(cleanUserId)) {
-    return { valid: false, error: 'El ID de usuario (UUID) no tiene un formato válido.' }
+    return { valid: false, error: 'El código de usuario ingresado no tiene un formato válido.' }
   }
   const normalizedRole = String(role || '').toLowerCase()
   if (!ALLOWED_MEMBER_ROLES.includes(normalizedRole)) {
-    return { valid: false, error: 'Seleccioná un rol válido (owner, admin, staff).' }
+    return { valid: false, error: 'Seleccioná un rol válido (Propietario, Administrador o Personal del taller).' }
   }
 
   const secCheck = preventSelfPrivilegeEscalation({
@@ -53,7 +53,7 @@ export function validateMemberAssignment({
   if (isTargetCurrentlyOwner && normalizedRole !== 'owner' && currentOwnerCount <= 1) {
     return {
       valid: false,
-      error: 'El taller no puede quedar sin propietario (owner). Asigná otro propietario antes de cambiar este rol.'
+      error: 'El taller no puede quedar sin propietario. Asigná otro propietario antes de cambiar este rol.'
     }
   }
 
@@ -72,10 +72,10 @@ export function validateMemberRemoval({
   }
   if (String(targetCurrentRole || '').toLowerCase() === 'owner') {
     if (String(callerRole || '').toLowerCase() !== 'owner') {
-      return { valid: false, error: 'Un administrador no puede eliminar a un propietario (owner) del taller.' }
+      return { valid: false, error: 'Un administrador no puede eliminar a un propietario del taller.' }
     }
     if (currentOwnerCount <= 1) {
-      return { valid: false, error: 'No se puede eliminar al único propietario (owner) del taller.' }
+      return { valid: false, error: 'No se puede eliminar al único propietario del taller.' }
     }
   }
   if (callerId === targetUserId && currentOwnerCount <= 1 && String(callerRole || '').toLowerCase() === 'owner') {
@@ -148,7 +148,7 @@ export function sanitizeAdminErrorMessage(
   ]
   if (internalPatterns.some(rx => rx.test(raw))) {
     if (/LAST_OWNER_PROTECTED/i.test(raw)) {
-      return 'Operación bloqueada: el taller no puede quedar sin al menos un propietario (owner).'
+      return 'Operación bloqueada: el taller no puede quedar sin al menos un propietario.'
     }
     return fallback
   }
@@ -157,7 +157,7 @@ export function sanitizeAdminErrorMessage(
 }
 
 async function invokeAdminEdgeFunction(payload) {
-  if (!supabase) throw new Error('Supabase no está inicializado.')
+  if (!supabase) throw new Error('El servicio de gestión no está inicializado.')
   const { data, error } = await supabase.functions.invoke('admin-management', {
     body: payload
   })
@@ -166,7 +166,7 @@ async function invokeAdminEdgeFunction(payload) {
     const msg = String(error.message || '')
     if (msg.includes('non-2xx') || msg.includes('Failed to send a request') || msg.includes('404')) {
       throw new Error(
-        'La operación administrativa requiere que la Edge Function "admin-management" esté desplegada en Supabase (ejecutá: npx supabase functions deploy admin-management).'
+        'No se pudo conectar con el servicio de administración del taller. Intentá nuevamente en unos instantes.'
       )
     }
     throw new Error(sanitizeAdminErrorMessage(msg))

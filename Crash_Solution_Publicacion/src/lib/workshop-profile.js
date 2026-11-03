@@ -114,7 +114,7 @@ export function validateLogoFile(file) {
   if (!ALLOWED_LOGO_TYPES.includes(file.type)) {
     return {
       valid: false,
-      error: 'Formato de imagen no válido. El bucket workshop-logos solo admite PNG, JPEG o WEBP.'
+      error: 'Formato de imagen no válido. Solo se admiten imágenes PNG, JPEG o WEBP.'
     }
   }
   if (file.size > MAX_LOGO_BYTES) {
