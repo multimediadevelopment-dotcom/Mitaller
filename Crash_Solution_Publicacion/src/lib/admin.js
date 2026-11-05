@@ -1,5 +1,6 @@
 import { supabase } from './supabase.js'
 import { VALID_WORKSHOP_ROLES, canAccessAdminPanel, preventSelfPrivilegeEscalation } from './auth.js'
+import { invokeAdministrativeAction, sendWorkshopInvitation, buildInvitationRedirect } from './admin-service.js'
 
 // Únicos roles admitidos por la restricción de base de datos en workshop_members
 export const ALLOWED_MEMBER_ROLES = VALID_WORKSHOP_ROLES // ['owner', 'admin', 'staff']
@@ -157,26 +158,7 @@ export function sanitizeAdminErrorMessage(
 }
 
 async function invokeAdminEdgeFunction(payload) {
-  if (!supabase) throw new Error('El servicio de gestión no está inicializado.')
-  const { data, error } = await supabase.functions.invoke('admin-management', {
-    body: payload
-  })
-
-  if (error) {
-    const msg = String(error.message || '')
-    if (msg.includes('non-2xx') || msg.includes('Failed to send a request') || msg.includes('404')) {
-      throw new Error(
-        'No se pudo conectar con el servicio de administración del taller. Intentá nuevamente en unos instantes.'
-      )
-    }
-    throw new Error(sanitizeAdminErrorMessage(msg))
-  }
-
-  if (data?.error) {
-    throw new Error(sanitizeAdminErrorMessage(data.error))
-  }
-
-  return data
+  return invokeAdministrativeAction(payload)
 }
 
 export async function createNewWorkshop({ userId, name, legal_name, tax_id, phone, whatsapp, email, address }) {
@@ -291,8 +273,8 @@ export async function inviteOrCreateWorkshopUser({
   displayName,
   phone,
   role
-}) {
-  if (password !== undefined && String(password).trim() !== '') {
+}, client = supabase) {
+  if (password !== undefined) {
     throw new Error(
       'Por seguridad, los administradores no deben ingresar ni conocer contraseñas de terceros. Utilizá la invitación por correo electrónico.'
     )
@@ -303,7 +285,8 @@ export async function inviteOrCreateWorkshopUser({
     throw new Error('Ingresá un correo electrónico válido para enviar la invitación.')
   }
 
-  const targetRole = ALLOWED_MEMBER_ROLES.includes(role) ? role : 'staff'
+  const targetRole = role || 'staff'
+  if (!ALLOWED_MEMBER_ROLES.includes(targetRole)) throw new Error('Seleccioná un rol válido.')
   const secCheck = preventSelfPrivilegeEscalation({
     callerId,
     callerRole,
@@ -317,16 +300,15 @@ export async function inviteOrCreateWorkshopUser({
     throw new Error('Seleccioná un taller antes de invitar a un usuario.')
   }
 
-  const redirectTo =
-    typeof window !== 'undefined' ? `${window.location.origin}${window.location.pathname}#update-password` : undefined
-
-  return await invokeAdminEdgeFunction({
+  const redirectTo = buildInvitationRedirect()
+  return await sendWorkshopInvitation({
     action: 'invite_user',
+    callerId,
     workshopId,
     email: cleanEmail,
     displayName: String(displayName || '').trim(),
     phone: String(phone || '').trim() || null,
     role: targetRole,
     redirectTo
-  })
+  }, client)
 }

@@ -20,7 +20,7 @@ import {
   sanitizeAdminErrorMessage,
   inviteOrCreateWorkshopUser
 } from '../Crash_Solution_Publicacion/src/lib/admin.js'
-import { supabase } from '../Crash_Solution_Publicacion/src/lib/supabase.js'
+import { supabase, liveTestsEnabled } from './live-supabase.js'
 
 describe('DEV-20 — Autenticación, Roles reales (owner | admin | staff) y Seguridad Server-Side', () => {
   it('admite únicamente los roles reales de la restricción SQL en workshop_members (owner, admin, staff)', () => {
@@ -375,7 +375,7 @@ describe('DEV-20 — Autenticación, Roles reales (owner | admin | staff) y Segu
     expect(membersTable.get('ws-1::owner-2')?.role).toBe('owner')
   })
 
-  it('verifica en vivo contra Supabase que RLS bloquea la inserción/modificación/eliminación directa en workshop_members y aísla datos entre talleres', async () => {
+  it.skipIf(!liveTestsEnabled)('verifica en vivo contra Supabase que RLS bloquea la inserción/modificación/eliminación directa en workshop_members y aísla datos entre talleres', async () => {
     expect(supabase).toBeTruthy()
 
     // 1. Sin sesión autorizada en el taller ajeno, las lecturas no devuelven filas de otros talleres

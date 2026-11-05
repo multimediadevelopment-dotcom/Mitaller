@@ -1,4 +1,6 @@
 import { supabase } from './supabase.js'
+import { privateReadCache } from './scoped-cache.js'
+import { fetchAllPages } from './paged-query.js'
 
 export const STOCK_CATEGORIES = ['Pinturas', 'Materiales', 'Insumos', 'Repuestos', 'Otros']
 
@@ -84,7 +86,8 @@ export function validateStockItemInput(input = {}) {
       unit,
       location: location || null,
       purchase_price: Math.round(purchasePrice * 100) / 100,
-      sale_price: Math.round(salePrice * 100) / 100,
+      // Omission in the simplified form must preserve the stored sale price on edits.
+      ...(input.sale_price !== undefined ? { sale_price: Math.round(salePrice * 100) / 100 } : {}),
       minimum_quantity: Math.round(minimumQuantity * 100) / 100,
       notes: notes || null
     },
@@ -268,34 +271,35 @@ export function filterStockItems(items = [], filters = {}) {
 }
 
 export async function fetchWorkshopStock(workshopId) {
+  return privateReadCache.read(`stock:${workshopId}`, () => fetchStockUncached(workshopId), 20000)
+}
+
+async function fetchStockUncached(workshopId) {
   if (!supabase || !workshopId) return []
 
-  const [itemsRes, compatRes] = await Promise.all([
-    supabase
+  const [items, compatibilities] = await Promise.all([
+    fetchAllPages(() => supabase
       .from('stock_items')
       .select(
         'id, workshop_id, name, category, brand, sku, description, quantity, unit, location, purchase_price, sale_price, minimum_quantity, notes, archived_at, created_at'
       )
       .eq('workshop_id', workshopId)
-      .order('name', { ascending: true }),
-    supabase
+      .order('name', { ascending: true }).order('id', { ascending: true })),
+    fetchAllPages(() => supabase
       .from('part_compatibility')
       .select('id, stock_item_id, workshop_id, vehicle_make, vehicle_model, year_from, year_to, version, position')
-      .eq('workshop_id', workshopId)
+      .eq('workshop_id', workshopId).order('id', { ascending: true }))
   ])
 
-  if (itemsRes.error) throw itemsRes.error
-  if (compatRes.error) throw compatRes.error
-
   const compatByItem = new Map()
-  for (const c of compatRes.data || []) {
+  for (const c of compatibilities) {
     if (!compatByItem.has(c.stock_item_id)) {
       compatByItem.set(c.stock_item_id, [])
     }
     compatByItem.get(c.stock_item_id).push(c)
   }
 
-  return (itemsRes.data || []).map(item => ({
+  return items.map(item => ({
     ...item,
     quantity: Number(item.quantity ?? 0),
     purchase_price: Number(item.purchase_price ?? 0),
@@ -306,6 +310,8 @@ export async function fetchWorkshopStock(workshopId) {
 }
 
 export async function recordStockMovement({ itemId, currentQuantity = 0, quantityChange, reason }) {
+  privateReadCache.invalidate('stock:')
+  privateReadCache.invalidate('movements:')
   if (!supabase) throw new Error('Supabase no está disponible.')
   const check = validateStockMovementInput({ itemId, currentQuantity, quantityChange, reason })
   if (!check.valid) throw new Error(check.error)
@@ -318,10 +324,14 @@ export async function recordStockMovement({ itemId, currentQuantity = 0, quantit
   })
 
   if (error) throw error
+  privateReadCache.invalidate('stock:')
+  privateReadCache.invalidate('movements:')
   return data
 }
 
 export async function createStockItem(workshopId, input, compatibilities = []) {
+  privateReadCache.invalidate('stock:')
+  privateReadCache.invalidate('movements:')
   if (!supabase || !workshopId) throw new Error('Seleccioná un taller activo para registrar productos en el stock.')
 
   const itemCheck = validateStockItemInput(input)
@@ -336,6 +346,7 @@ export async function createStockItem(workshopId, input, compatibilities = []) {
     .insert({
       workshop_id: workshopId,
       ...itemCheck.values,
+      sale_price: itemCheck.values.sale_price ?? 0,
       quantity: 0
     })
     .select(
@@ -364,10 +375,13 @@ export async function createStockItem(workshopId, input, compatibilities = []) {
     })
   }
 
+  privateReadCache.invalidate('stock:')
+  privateReadCache.invalidate('movements:')
   return created
 }
 
 export async function updateStockItem(workshopId, itemId, input, compatibilities = []) {
+  privateReadCache.invalidate('stock:')
   if (!supabase || !workshopId || !itemId) {
     throw new Error('Faltan datos del taller o producto para guardar los cambios.')
   }
@@ -410,10 +424,12 @@ export async function updateStockItem(workshopId, itemId, input, compatibilities
     if (insCompatErr) throw insCompatErr
   }
 
+  privateReadCache.invalidate('stock:')
   return updated
 }
 
 export async function archiveStockItem(workshopId, itemId, archive = true) {
+  privateReadCache.invalidate('stock:')
   if (!supabase || !workshopId || !itemId) {
     throw new Error('Seleccioná un producto válido.')
   }
@@ -429,10 +445,15 @@ export async function archiveStockItem(workshopId, itemId, archive = true) {
     .single()
 
   if (error) throw error
+  privateReadCache.invalidate('stock:')
   return data
 }
 
 export async function fetchStockMovements(workshopId, itemId = null, limit = 60) {
+  return privateReadCache.read(`movements:${workshopId}:${itemId || 'all'}:${limit}`, () => fetchMovementsUncached(workshopId, itemId, limit), 20000)
+}
+
+async function fetchMovementsUncached(workshopId, itemId, limit) {
   if (!supabase || !workshopId) return []
 
   let query = supabase

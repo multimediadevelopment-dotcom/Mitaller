@@ -222,9 +222,7 @@ export async function signInWithEmail(email, password) {
   })
   if (error) throw new Error(translateAuthError(error))
 
-  if (data.user) {
-    await ensureUserProfile(data.user).catch(() => null)
-  }
+  // Profile and memberships are initialized once by the session event handler.
   return data
 }
 

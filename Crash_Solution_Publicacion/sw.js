@@ -2,20 +2,14 @@
  * Cachea únicamente recursos estáticos propios (App Shell, CSS/JS compilados, íconos e ilustraciones).
  * Nunca cachea endpoints de Supabase Auth/REST/Storage ni solicitudes con credenciales privadas.
  */
-const CACHE_NAME = 'crash-solution-shell-v3';
+const CACHE_NAME = 'crash-solution-shell-v4';
 const APP_FILES = [
   './',
   './index.html',
   './manifest.webmanifest',
   './icons/icon-192.png',
   './icons/icon-512.png',
-  './icons/apple-touch-icon.png',
-  './auto_1_sedan_4_puertas.png',
-  './auto_2_coupe_2_puertas.png',
-  './auto_3_camioneta_doble_cabina.png',
-  './auto_4_van_3_filas.png',
-  './auto_4_van_3_filas.svg',
-  './comparativa.png'
+  './icons/apple-touch-icon.png'
 ];
 
 self.addEventListener('install', event => {
@@ -23,7 +17,14 @@ self.addEventListener('install', event => {
     caches
       .open(CACHE_NAME)
       .then(async cache => {
-        for (const asset of APP_FILES) {
+        let deferred = [];
+        try {
+          const response = await fetch('./precache-manifest.json', {cache:'no-store'});
+          if (response.ok) deferred = await response.json();
+        } catch { /* Keep installing the core shell if offline */ }
+        // Includes deferred PDF chunks so the first PDF also works offline.
+        const assets = [...APP_FILES, ...deferred.filter(path => /^(assets|vehicle-assets)\//.test(path) && !path.includes('..'))];
+        for (const asset of assets) {
           try {
             await cache.add(asset);
           } catch {
@@ -61,6 +62,7 @@ self.addEventListener('fetch', event => {
   if (
     url.origin !== self.location.origin ||
     url.pathname.includes('/api/') ||
+    /\/(auth|rest|storage)\/v1\//.test(url.pathname) ||
     request.headers.has('Authorization')
   ) {
     return;
@@ -79,6 +81,19 @@ self.addEventListener('fetch', event => {
         })
         .catch(() => caches.match('./index.html'))
     );
+    return;
+  }
+
+  // Content-hashed bundles and illustrations are immutable; avoid a redundant
+  // network request on every cached hit. No Auth/REST/Storage data is cached.
+  if (/\/(assets|vehicle-assets)\/[^/]+-[A-Za-z0-9_-]{8,}\.(js|css|webp|svg)$/.test(url.pathname)) {
+    event.respondWith(caches.match(request).then(cached => cached || fetch(request).then(response => {
+      if (response.ok && response.type === 'basic') {
+        const copy = response.clone();
+        event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.put(request, copy)));
+      }
+      return response;
+    })));
     return;
   }
 

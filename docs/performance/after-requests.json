@@ -1,0 +1,44 @@
+{
+  "stage": "after",
+  "method": "Actual application orchestration, simulated Supabase with 20 ms per request, 3 samples. Not production latency.",
+  "medianLoginMs": 142.79449999999997,
+  "medianTwoProfileVisitsMs": 59.52170000000024,
+  "samples": [
+    {
+      "loginMs": 156.44920000000025,
+      "loginRequests": [
+        "auth:signIn",
+        "select:user_profiles",
+        "select:workshop_members",
+        "storage:download",
+        "select:jobs"
+      ],
+      "twoProfileVisitsMs": 59.52170000000024,
+      "profileVisitRequests": []
+    },
+    {
+      "loginMs": 136.4001000000003,
+      "loginRequests": [
+        "auth:signIn",
+        "select:user_profiles",
+        "select:workshop_members",
+        "storage:download",
+        "select:jobs"
+      ],
+      "twoProfileVisitsMs": 74.95499999999993,
+      "profileVisitRequests": []
+    },
+    {
+      "loginMs": 142.79449999999997,
+      "loginRequests": [
+        "auth:signIn",
+        "select:user_profiles",
+        "select:workshop_members",
+        "storage:download",
+        "select:jobs"
+      ],
+      "twoProfileVisitsMs": 33.54569999999967,
+      "profileVisitRequests": []
+    }
+  ]
+}

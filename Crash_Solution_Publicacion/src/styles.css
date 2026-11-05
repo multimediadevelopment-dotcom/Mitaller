@@ -1,4 +1,9 @@
-@import 'animate.css';
+/* Only the animation used by this application; retain reduced-motion support. */
+@keyframes profileFadeIn { from { opacity: 0; } to { opacity: 1; } }
+.animate__animated { animation-duration: .2s; animation-fill-mode: both; }
+.animate__fadeIn { animation-name: profileFadeIn; }
+.list-load-more { grid-column: 1 / -1; justify-self: center; margin: 16px 0; }
+.section-loading { padding: 16px 0; color: #526b82; font-size: 13px; }
 
 /* Respetar prefers-reduced-motion en todas las animaciones (Regla global) */
 @media (prefers-reduced-motion: reduce) {
@@ -432,12 +437,18 @@
 
 .stock-qty-box {
   display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
   align-items: baseline;
   justify-content: space-between;
   background: #f4f7fb;
   border-radius: 12px;
   padding: 12px 14px;
   margin: 4px 0;
+}
+
+.stock-summary-stats {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .stock-qty-value {
@@ -622,51 +633,132 @@
   border-radius: 999px;
   font-size: 11px;
   font-weight: 750;
-  border: 1px solid rgba(255, 255, 255, 0.22);
-  background: rgba(255, 255, 255, 0.09);
-  color: #e9f2fb;
-  white-space: nowrap;
-  transition: transform 0.2s ease, opacity 0.2s ease;
+  border: 1px solid #bbdfc9;
+  background: #e8f5ee;
+  color: #166534;
+  white-space: normal;
+  max-width: 100%;
+  opacity: 1;
+  -webkit-text-fill-color: currentColor;
+  transition: background-color 0.2s ease;
 }
 
 .conn-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #38d399;
+  background: #15803d;
   display: inline-block;
   flex-shrink: 0;
 }
 
+.conn-badge.online {
+  background: #e8f5ee;
+  color: #166534;
+  border-color: #bbdfc9;
+}
+
 .conn-badge.online .conn-dot {
-  background: #38d399;
+  background: #15803d;
 }
 
 .conn-badge.pending {
-  background: rgba(40, 103, 213, 0.35);
-  border-color: rgba(144, 184, 255, 0.5);
+  background: #edf3fd;
+  color: #1e40af;
+  border-color: #bfd0f3;
 }
 
 .conn-badge.pending .conn-dot {
-  background: #7ab3ff;
+  background: #2563eb;
 }
 
 .conn-badge.offline {
-  background: rgba(182, 109, 34, 0.35);
-  border-color: rgba(255, 196, 130, 0.55);
-  color: #ffe7cc;
+  background: #fff4e5;
+  border-color: #f2cf9b;
+  color: #92400e;
 }
 
 .conn-badge.offline .conn-dot {
-  background: #ffaa4c;
+  background: #b45309;
 }
 
 .conn-badge.conflict {
-  background: rgba(180, 52, 52, 0.42);
-  border-color: rgba(255, 150, 150, 0.6);
-  color: #ffe3e3;
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #991b1b;
 }
 
 .conn-badge.conflict .conn-dot {
-  background: #ff6b6b;
+  background: #b91c1c;
+}
+/* Session navigation: identity stays in the account dropdown. */
+.app-header { position: relative; }
+.app-header .header-nav { flex: 1; justify-content: flex-end; min-width: 0; }
+.primary-navigation { display: flex; gap: 6px; align-items: center; }
+.profile-menu-wrap { position: relative; }
+.profile-toggle { border: 1px solid #ffffff60; background: #ffffff18; color: white; width: 42px; height: 42px; border-radius: 50%; font-weight: 750; }
+.profile-dropdown { position: absolute; right: 0; top: calc(100% + 12px); width: 300px; max-width: calc(100vw - 32px); max-height: calc(100dvh - 110px); overflow-y: auto; background: white; color: var(--ink); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 12px 40px #132c4333; padding: 10px; z-index: 50; }
+.profile-dropdown > button { display: block; width: 100%; text-align: left; border: 0; background: transparent; color: var(--ink); border-radius: 8px; min-height: 44px; padding: 10px 12px; }
+.profile-dropdown > button:hover { background: var(--blue-soft); }
+.profile-identity { display: grid; gap: 8px; padding: 12px; border-bottom: 1px solid var(--line); margin-bottom: 6px; overflow-wrap: anywhere; }
+.profile-identity .role-chip { justify-self: start; }
+.profile-dropdown .workshop-switcher { width: 100%; min-width: 0; color: var(--ink); background: white; }
+.profile-dropdown .conn-badge { margin: 8px; }
+.mobile-nav-toggle { display: none; }
+@media (max-width: 1000px) {
+  .app-header { height: auto; min-height: 78px; padding: 12px 16px; gap: 10px; }
+  .app-header .header-tools { display: none; }
+  .app-header .header-nav { width: auto; flex: 1; flex-wrap: nowrap; }
+  .mobile-nav-toggle { display: inline-flex; }
+  .primary-navigation { display: none; position: absolute; top: 100%; left: 16px; right: 16px; padding: 10px; background: var(--navy); border-radius: 0 0 12px 12px; z-index: 45; box-shadow: 0 10px 20px #132c4330; }
+  .primary-navigation.is-open { display: flex; flex-direction: column; align-items: stretch; }
+}
+
+/* Personal account card. It overlays the current section without replacing it. */
+.personal-profile-dialog { width: min(860px, calc(100% - 32px)); max-width: 860px; max-height: calc(100dvh - 32px); padding: 0; border: 1px solid #dce5ee; border-radius: 22px; background: #fff; box-shadow: 0 24px 80px #132c4340; overflow-y: auto; }
+.personal-profile-dialog::backdrop { background: #0b2038a6; backdrop-filter: blur(4px); }
+.personal-profile-dialog svg { width: 19px; height: 19px; flex-shrink: 0; vertical-align: middle; }
+.personal-profile-top { padding: 22px 30px 30px; color: #fff; background: radial-gradient(ellipse at top right, #2867d560, transparent 65%), var(--navy); }
+.personal-profile-top .eyebrow { color: #a8caff; margin: 18px 0 7px; }
+.personal-profile-top h2 { font-size: 30px; letter-spacing: -.8px; margin: 0 0 8px; }
+.personal-profile-top > p:last-child { color: #d1dfec; margin: 0; font-size: 13px; }
+.profile-back { display: inline-flex; gap: 8px; align-items: center; background: transparent; border: 0; color: #e4eef9; min-height: 44px; padding: 0; text-align: left; font-size: 12px; font-weight: 650; }
+.profile-back:hover { color: #fff; text-decoration: underline; }
+.personal-profile-layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); }
+.personal-profile-identity { min-width: 0; background: #f6f9fc; padding: 30px 24px; text-align: center; border-right: 1px solid var(--line); }
+.personal-profile-avatar { position: relative; display: grid; place-items: center; margin: 0 auto 17px; width: 96px; height: 96px; overflow: hidden; border: 5px solid #fff; border-radius: 50%; color: #fff; background: linear-gradient(135deg, #20415d, #2867d5); box-shadow: 0 0 0 1px #d9e4f1, 0 6px 16px #132c4314; font-size: 30px; font-weight: 800; letter-spacing: .03em; }
+.personal-profile-avatar img { position: absolute; width: 100%; height: 100%; object-fit: cover; }
+.personal-profile-identity h3 { font-size: 20px; line-height: 1.3; letter-spacing: -.4px; overflow-wrap: anywhere; margin: 0 0 12px; }
+.personal-profile-role { display: inline-flex; gap: 6px; align-items: center; justify-content: center; padding: 7px 10px; border-radius: 20px; background: #e6eefc; border: 1px solid #d1def7; color: #234f9b; font-size: 11px; font-weight: 750; }
+.personal-profile-role svg { width: 15px; height: 15px; }
+.personal-profile-workshop { display: flex; gap: 10px; align-items: flex-start; text-align: left; margin-top: 27px; padding-top: 22px; border-top: 1px solid #dce5ee; color: #526b82; font-size: 11px; }
+.personal-profile-workshop strong { display: block; margin-top: 4px; color: var(--ink); font-size: 13px; overflow-wrap: anywhere; }
+.personal-profile-details { padding: 30px; min-width: 0; }
+.personal-profile-section-heading { margin-bottom: 24px; }
+.personal-profile-section-heading h3 { font-size: 18px; margin-bottom: 5px; }
+.personal-profile-section-heading p { color: #64788b; font-size: 12px; margin: 0; }
+.personal-profile-fields { display: grid; gap: 18px; }
+.personal-profile-fields label { display: block; color: #4f6275; font-size: 12px; font-weight: 700; }
+.personal-profile-fields label > svg { margin-right: 7px; color: #65829f; }
+.personal-profile-fields input { font-size: 14px; margin-top: 9px; }
+.personal-profile-fields input[readonly] { background: #f6f9fc; border-color: #e7edf3; color: var(--ink); }
+.personal-profile-fields input[readonly]::placeholder { color: #64788b; opacity: 1; }
+.personal-profile-contact { margin: 20px 0 0; }
+.personal-profile-contact dt { color: #4f6275; font-size: 12px; font-weight: 700; }
+.personal-profile-contact dt svg { margin-right: 7px; color: #65829f; }
+.personal-profile-contact dd { margin: 9px 0 0; font-size: 14px; color: var(--ink); overflow-wrap: anywhere; }
+.personal-profile-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 26px; padding-top: 22px; border-top: 1px solid var(--line); }
+.personal-profile-actions .button { min-height: 44px; }
+@media (max-width: 600px) {
+  .personal-profile-dialog { width: calc(100% - 24px); max-height: calc(100dvh - 24px); border-radius: 18px; }
+  .personal-profile-top { padding: 16px 20px 24px; }
+  .personal-profile-top h2 { font-size: 26px; }
+  .personal-profile-layout { grid-template-columns: minmax(0, 1fr); }
+  .personal-profile-identity { border-right: 0; border-bottom: 1px solid var(--line); padding: 24px 20px; }
+  .personal-profile-avatar { width: 80px; height: 80px; font-size: 26px; margin-bottom: 12px; }
+  .personal-profile-workshop { margin-top: 20px; padding-top: 16px; }
+  .personal-profile-details { padding: 24px 20px; }
+  .personal-profile-fields input { font-size: 16px; }
+  .personal-profile-actions { flex-direction: column; }
+  .personal-profile-actions .button { width: 100%; }
 }

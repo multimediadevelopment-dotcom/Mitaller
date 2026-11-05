@@ -1,0 +1,214 @@
+{
+  "stage": "after",
+  "measuredAt": "2026-11-05T20:06:12.972Z",
+  "method": "Local HTTP, production resources with gzip, 10 samples after 2 warmups; no browser execution, no Supabase, no CPU/mobile throttling.",
+  "totalAuditMs": 4087.6190999999994,
+  "initialRawBytes": 479349,
+  "initialGzipBytes": 129609,
+  "initialFiles": [
+    "index.html",
+    "assets/index-C4OmR5m9.js",
+    "assets/index-2yB_Nf8G.css"
+  ],
+  "initialJsGzipBytes": 104359,
+  "medianHtmlTtfbMs": 0.7186000000001513,
+  "medianInitialResourceTransferMs": 5.11239999999998,
+  "samples": [
+    {
+      "htmlTtfbMs": 1.2393000000001848,
+      "initialResourceTransferMs": 34.467899999999645
+    },
+    {
+      "htmlTtfbMs": 2.584100000000035,
+      "initialResourceTransferMs": 10.789500000000771
+    },
+    {
+      "htmlTtfbMs": 1.4192999999995664,
+      "initialResourceTransferMs": 8.115799999999581
+    },
+    {
+      "htmlTtfbMs": 0.7186000000001513,
+      "initialResourceTransferMs": 5.11239999999998
+    },
+    {
+      "htmlTtfbMs": 0.6055999999998676,
+      "initialResourceTransferMs": 5.07300000000032
+    },
+    {
+      "htmlTtfbMs": 2.0901999999996406,
+      "initialResourceTransferMs": 24.754299999999603
+    },
+    {
+      "htmlTtfbMs": 0.6277000000000044,
+      "initialResourceTransferMs": 4.684600000000501
+    },
+    {
+      "htmlTtfbMs": 0.5610999999998967,
+      "initialResourceTransferMs": 4.632299999999304
+    },
+    {
+      "htmlTtfbMs": 0.5520999999998821,
+      "initialResourceTransferMs": 4.473399999999856
+    },
+    {
+      "htmlTtfbMs": 0.5254999999997381,
+      "initialResourceTransferMs": 5.091400000000249
+    }
+  ],
+  "files": [
+    {
+      "name": "assets/index-C4OmR5m9.js",
+      "bytes": 391165,
+      "gzipBytes": 104359,
+      "initial": true
+    },
+    {
+      "name": "assets/budget-delivery-BbmT9bdn.js",
+      "bytes": 397285,
+      "gzipBytes": 130533,
+      "initial": false
+    },
+    {
+      "name": "assets/html2canvas.esm-QH1iLAAe.js",
+      "bytes": 202379,
+      "gzipBytes": 48044,
+      "initial": false
+    },
+    {
+      "name": "assets/purify.es-CAi2OJFm.js",
+      "bytes": 30469,
+      "gzipBytes": 11726,
+      "initial": false
+    },
+    {
+      "name": "assets/index.es-Ax_nBIwH.js",
+      "bytes": 159973,
+      "gzipBytes": 53623,
+      "initial": false
+    },
+    {
+      "name": "assets/manifest-Bjusqv_d.webmanifest",
+      "bytes": 614,
+      "gzipBytes": 316,
+      "initial": false
+    },
+    {
+      "name": "assets/icon-192-Do5uLczO.png",
+      "bytes": 2763,
+      "gzipBytes": 2636,
+      "initial": false
+    },
+    {
+      "name": "assets/apple-touch-icon-DH1Q8ddM.png",
+      "bytes": 2578,
+      "gzipBytes": 2471,
+      "initial": false
+    },
+    {
+      "name": "assets/index-2yB_Nf8G.css",
+      "bytes": 15236,
+      "gzipBytes": 3779,
+      "initial": true
+    },
+    {
+      "name": "precache-manifest.json",
+      "bytes": 360,
+      "gzipBytes": 209,
+      "initial": false
+    },
+    {
+      "name": "sw.js",
+      "bytes": 3940,
+      "gzipBytes": 1565,
+      "initial": false
+    },
+    {
+      "name": "index.html",
+      "bytes": 72948,
+      "gzipBytes": 21471,
+      "initial": true
+    }
+  ],
+  "largestModules": [
+    {
+      "name": "node_modules/html2canvas/dist/html2canvas.esm.js",
+      "renderedBytes": 409395
+    },
+    {
+      "name": "node_modules/jspdf/dist/jspdf.es.min.js",
+      "renderedBytes": 342268
+    },
+    {
+      "name": "node_modules/@supabase/auth-js/dist/module/GoTrueClient.js",
+      "renderedBytes": 271500
+    },
+    {
+      "name": "node_modules/canvg/lib/index.es.js",
+      "renderedBytes": 169262
+    },
+    {
+      "name": "src-root/src/main.js",
+      "renderedBytes": 147030
+    },
+    {
+      "name": "node_modules/@supabase/storage-js/dist/index.mjs",
+      "renderedBytes": 114646
+    },
+    {
+      "name": "node_modules/@supabase/postgrest-js/dist/index.mjs",
+      "renderedBytes": 111174
+    },
+    {
+      "name": "node_modules/pako/dist/pako.esm.mjs",
+      "renderedBytes": 109269
+    },
+    {
+      "name": "node_modules/dompurify/dist/purify.es.mjs",
+      "renderedBytes": 84362
+    },
+    {
+      "name": "node_modules/@supabase/phoenix/priv/static/phoenix.mjs",
+      "renderedBytes": 56053
+    },
+    {
+      "name": "node_modules/@supabase/supabase-js/dist/index.mjs",
+      "renderedBytes": 38040
+    },
+    {
+      "name": "node_modules/@supabase/auth-js/dist/module/GoTrueAdminApi.js",
+      "renderedBytes": 35915
+    },
+    {
+      "name": "node_modules/@supabase/realtime-js/dist/module/RealtimeChannel.js",
+      "renderedBytes": 34155
+    },
+    {
+      "name": "node_modules/@supabase/auth-js/dist/module/lib/webauthn.js",
+      "renderedBytes": 33724
+    },
+    {
+      "name": "src-root/src/lib/offline-sync.js",
+      "renderedBytes": 30846
+    },
+    {
+      "name": "node_modules/@supabase/realtime-js/dist/module/RealtimeClient.js",
+      "renderedBytes": 26019
+    },
+    {
+      "name": "node_modules/@supabase/auth-js/dist/module/lib/helpers.js",
+      "renderedBytes": 21820
+    },
+    {
+      "name": "node_modules/fflate/esm/browser.js",
+      "renderedBytes": 20128
+    },
+    {
+      "name": "node_modules/svg-pathdata/lib/SVGPathData.module.js",
+      "renderedBytes": 19012
+    },
+    {
+      "name": "node_modules/iobuffer/lib-esm/IOBuffer.js",
+      "renderedBytes": 18910
+    }
+  ]
+}

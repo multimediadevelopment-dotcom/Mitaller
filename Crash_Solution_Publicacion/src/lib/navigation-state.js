@@ -15,6 +15,8 @@ export function buildNavigationSnapshot({
   openPieceDetailsKeys = [],
   mapOpen = true,
   scrollY = 0,
+  jobListLimit = 60,
+  stockListLimit = 40,
   updatedAt = null
 } = {}) {
   const normalizedScreen = VALID_SCREENS.includes(screen) ? screen : 'jobs'
@@ -36,6 +38,8 @@ export function buildNavigationSnapshot({
       : [],
     mapOpen: Boolean(mapOpen),
     scrollY: normalizedScrollY,
+    jobListLimit: Math.max(60, Number(jobListLimit) || 60),
+    stockListLimit: Math.max(40, Number(stockListLimit) || 40),
     updatedAt: updatedAt ? String(updatedAt) : new Date().toISOString()
   }
 }

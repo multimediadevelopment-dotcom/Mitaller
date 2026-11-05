@@ -1,4 +1,9 @@
 import './styles.css'
+import { getProfileInitials, updatePersonalProfile } from './lib/personal-profile.js'
+import { createAppRouter, readAppRoute, routeHash, routeForSnapshot } from './lib/app-router.js'
+import { privateReadCache } from './lib/scoped-cache.js'
+import { resetInvitationRequests, isPasswordSetupCallback } from './lib/admin-service.js'
+import { fetchAllPages } from './lib/paged-query.js'
 import { supabase, isSupabaseConfigured } from './lib/supabase.js'
 import {
   ROLE_LABELS,
@@ -27,6 +32,7 @@ import {
   updateWorkshopProfile,
   uploadWorkshopLogo,
   resolveWorkshopLogoUrl,
+  rememberWorkshopProfile,
   buildBudgetWorkshopHeaderHtml,
   formatCuit
 } from './lib/workshop-profile.js'
@@ -44,11 +50,7 @@ import {
   recordStockMovement,
   fetchStockMovements
 } from './lib/stock.js'
-import {
-  openWhatsappWithBudgetText,
-  downloadBudgetPdf,
-  shareBudgetPdf
-} from './lib/budget-delivery.js'
+import { openWhatsappWithBudgetText } from './lib/budget-messages.js'
 import {
   saveOfflineJob,
   getOfflineJobsForScope,
@@ -64,6 +66,7 @@ import {
 } from './lib/offline-sync.js'
 import {
   saveNavigationState,
+  buildNavigationSnapshot,
   loadNavigationState,
   clearNavigationState,
   shouldReinitializeOnAuthEvent
@@ -103,6 +106,8 @@ export const appAuthState = {
   },
   editingStockItem: null,
   draftCompatibilities: [],
+  stockVisibleCount: 40,
+  stockRenderFilterKey: '',
   movementTargetItem: null
 }
 
@@ -112,6 +117,158 @@ function getActiveMembership() {
     appAuthState.memberships.find(m => m.workshop_id === appAuthState.activeWorkshopId) ||
     appAuthState.memberships[0]
   )
+}
+
+let appRouter = null
+let routeRenderingDepth = 0
+let routeInitializedFor = null
+let budgetDeliveryModule = null
+let budgetDeliveryPromise = null
+let pendingSessionInitialization = null
+let jobsLoadPromise = null
+let jobsLoadScope = null
+let lastHeaderMarkup = ''
+function prepareBudgetDelivery() {
+  if (budgetDeliveryModule) return Promise.resolve(budgetDeliveryModule)
+  if (budgetDeliveryPromise) return budgetDeliveryPromise
+  const buttons = ['downloadBudgetPdfBtn', 'shareBudgetPdfBtn'].map(id => document.getElementById(id)).filter(Boolean)
+  buttons.forEach(button => { button.disabled = true; button.setAttribute('aria-busy', 'true') })
+  budgetDeliveryPromise = import('./lib/budget-delivery.js').then(module => {
+    budgetDeliveryModule = module
+    return module
+  }).catch(error => {
+    setBudgetDeliveryFeedback('error', 'No se pudo preparar el PDF. Revisá tu conexión y volvé a intentar.')
+    throw error
+  }).finally(() => {
+    budgetDeliveryPromise = null
+    buttons.forEach(button => { button.disabled = false; button.removeAttribute('aria-busy') })
+  })
+  return budgetDeliveryPromise
+}
+let initialRecoveryRequested = isPasswordSetupCallback(window.location)
+const routeScope = () => `${appAuthState.user?.id || 'anonymous'}:${getActiveMembership()?.workshop_id || '-'}`
+function clearWorkshopReadState() {
+  clearScreenNotices()
+  document.getElementById('syncNotice')?.replaceChildren()
+  const syncNotice = document.getElementById('syncNotice')
+  if (syncNotice) syncNotice.hidden = true
+  resetInvitationRequests()
+  appAuthState.activeWorkshopProfile = null
+  appAuthState.stockItems = []
+  appAuthState.stockMovements = []
+  appAuthState.adminMembers = []
+  appAuthState.knownProfiles = []
+  appAuthState.editingStockItem = null
+  appAuthState.movementTargetItem = null
+  appAuthState.draftCompatibilities = []
+  for (const id of ['profileScreen', 'stockScreen', 'adminScreen']) document.getElementById(id)?.replaceChildren()
+}
+const duringRouteRender = callback => {
+  routeRenderingDepth++
+  try { return callback() } finally { routeRenderingDepth-- }
+}
+
+export function resetAppRouter() {
+  appRouter?.dispose()
+  appRouter = null
+  routeInitializedFor = null
+}
+
+function getAppRouter() {
+  if (!appRouter) appRouter = createAppRouter({
+    window, scope: routeScope, render: renderAppRoute,
+    onError: () => window.toast?.('No se pudo abrir la sección. Intentá nuevamente.')
+  })
+  return appRouter
+}
+
+export function navigateAppRoute(route, options = {}) {
+  if (options.captureDeparture !== false) persistCurrentNavigationState()
+  return getAppRouter().navigate(route, options)
+}
+
+function hidePasswordScreen() {
+  appAuthState.authMode = 'login'
+  const authScreen = document.getElementById('authScreen')
+  if (authScreen) { authScreen.hidden = true; authScreen.innerHTML = '' }
+  const mainApp = document.getElementById('mainAppContainer')
+  if (mainApp) mainApp.hidden = false
+}
+
+export function clearScreenNotices() {
+  // Messages are transient UI state; clearing them must never change the draft or sync queue.
+  for (const element of document.querySelectorAll('#notice, .auth-alert, #budgetDeliveryFeedback')) {
+    element.hidden = true
+    element.replaceChildren()
+    delete element.dataset.validation
+  }
+}
+
+async function renderAppRoute(route, entry) {
+  clearScreenNotices()
+  document.getElementById('myProfileDialog')?.remove()
+  const validSession = appAuthState.user && !isSessionExpired(appAuthState.session)
+  if (!validSession || route.name === 'password') {
+    appAuthState.authMode = validSession && route.name === 'password' ? 'update-password' : 'login'
+    const main = document.getElementById('mainAppContainer')
+    if (main) main.hidden = true
+    const auth = document.getElementById('authScreen')
+    if (auth) { auth.hidden = false; renderAuthScreen() }
+    renderHeaderNavigation()
+    return
+  }
+  hidePasswordScreen()
+  if (['stock', 'profile'].includes(route.name) && !getActiveMembership()) {
+    return getAppRouter().navigate({ name: 'admin' }, { replace: true })
+  }
+  const screens = { jobs: 'jobsScreen', work: 'workScreen', stock: 'stockScreen', profile: 'profileScreen', admin: 'adminScreen' }
+  for (const [name, id] of Object.entries(screens)) {
+    const element = document.getElementById(id)
+    if (element) element.hidden = name !== route.name
+  }
+  const restoreScroll = () => {
+    if (entry.snapshot?.screen !== route.name || !entry.snapshot.scrollY) return
+    requestAnimationFrame(() => {
+      if (getAppRouter().state()?.id === entry.id) window.scrollTo({ top: entry.snapshot.scrollY, behavior: 'auto' })
+    })
+  }
+  const loadSection = async task => {
+    const section = document.getElementById(screens[route.name])
+    if (section) {
+      section.setAttribute('aria-busy', 'true')
+      if (!section.textContent.trim()) section.innerHTML = '<p class="section-loading" role="status">Cargando sección…</p>'
+    }
+    try { await task() } finally { section?.removeAttribute('aria-busy') }
+    restoreScroll()
+  }
+  if (route.name === 'admin') return loadSection(() => openAdminScreen({ fromRoute: true }))
+  if (route.name === 'profile') return loadSection(() => openProfileScreen({ fromRoute: true }))
+  if (route.name === 'stock') {
+    if (entry.snapshot?.stockListLimit) {
+      appAuthState.stockVisibleCount = entry.snapshot.stockListLimit
+      appAuthState.stockRenderFilterKey = JSON.stringify([routeScope(), appAuthState.stockFilters])
+    }
+    return loadSection(() => openStockScreen({ fromRoute: true }))
+  }
+  if (route.name === 'work') {
+    const stored = loadNavigationState({ userId: appAuthState.user.id, workshopId: getActiveMembership()?.workshop_id })
+    const candidate = entry.snapshot?.activeJobId === route.jobId ? entry.snapshot : stored?.activeJobId === route.jobId ? stored : null
+    const snapshot = buildNavigationSnapshot({
+      ...candidate, userId: appAuthState.user.id, workshopId: getActiveMembership()?.workshop_id,
+      screen: 'work', activeJobId: route.jobId, step: route.step,
+      area: candidate?.area || window.store?.jobs?.find(job => job.id === route.jobId)?.area
+    })
+    const restored = await duringRouteRender(() => restoreSavedNavigationState(snapshot))
+    if (getAppRouter().state()?.id !== entry.id || readAppRoute(window.location).name !== 'work') return
+    if (!restored) return getAppRouter().navigate({ name: 'jobs' }, { replace: true })
+    persistCurrentNavigationState({ screen: 'work' })
+  } else {
+    if (entry.snapshot?.jobListLimit) window.jobDisplayLimit = entry.snapshot.jobListLimit
+    duringRouteRender(() => window.showJobs?.())
+    persistCurrentNavigationState({ screen: 'jobs', activeJobId: null })
+    restoreScroll()
+  }
+  renderHeaderNavigation()
 }
 
 function setAuthAlert(type, message) {
@@ -305,8 +462,8 @@ function renderAuthScreen() {
   document.getElementById('goToResetBtn')?.addEventListener('click', () => switchAuthMode('reset'))
   document.getElementById('backToLoginBtn')?.addEventListener('click', () => switchAuthMode('login'))
   document.getElementById('cancelUpdatePassBtn')?.addEventListener('click', () => {
-    if (window.location.hash === '#update-password') history.replaceState(null, '', window.location.pathname)
-    enforceRouteProtection()
+    leavePasswordScreen()
+    renderHeaderNavigation()
   })
 
   document.getElementById('loginForm')?.addEventListener('submit', handleLoginSubmit)
@@ -411,12 +568,8 @@ async function handleUpdatePasswordSubmit(e) {
   }
   try {
     await updateUserPassword(newPass, confirmPass)
-    if (window.location.hash === '#update-password') {
-      history.replaceState(null, '', window.location.pathname)
-    }
-    appAuthState.authMode = 'login'
     window.toast?.('Contraseña actualizada con éxito.')
-    await enforceRouteProtection()
+    await leavePasswordScreen()
   } catch (err) {
     setAuthAlert('error', err.message || 'No se pudo actualizar la contraseña.')
   } finally {
@@ -428,6 +581,7 @@ async function handleUpdatePasswordSubmit(e) {
 }
 
 export async function handleLogout() {
+  privateReadCache.clear()
   const prevUserId = appAuthState.user?.id || null
   const activeMembership = getActiveMembership()
   try {
@@ -447,6 +601,7 @@ export async function handleLogout() {
       userId: prevUserId,
       workshopId: activeMembership?.workshop_id || null
     })
+    clearWorkshopReadState()
     clearNavigationState()
     if (window.store) {
       window.store.jobs = []
@@ -454,6 +609,7 @@ export async function handleLogout() {
     }
     window.active = null
     await signOutUser()
+    appAuthState.authMode = 'login'
     appAuthState.session = null
     appAuthState.user = null
     appAuthState.profile = null
@@ -465,7 +621,8 @@ export async function handleLogout() {
     appAuthState.activePieceKey = null
     appAuthState.openPieceDetailsKeys = []
     window.toast?.('Sesión cerrada. Los cambios pendientes quedaron resguardados en este dispositivo hasta tu próximo ingreso.')
-    await enforceRouteProtection()
+    routeInitializedFor = null
+    await getAppRouter().navigate({ name: 'jobs' }, { replace: true })
   } catch (err) {
     window.toast?.(err.message || 'Error al cerrar sesión.')
   }
@@ -479,8 +636,11 @@ function getCurrentActiveScreenName() {
   return 'jobs'
 }
 
-export function persistCurrentNavigationState(overrides = {}) {
+export function persistCurrentNavigationState(overrides = {}, { capture = true } = {}) {
   if (!appAuthState.user?.id) return null
+  if (appRouter && readAppRoute(window.location).name === 'password' && !overrides.screen) {
+    return appRouter.state()?.snapshot || null
+  }
   const activeMembership = getActiveMembership()
   const openDetails = Array.from(
     document.querySelectorAll('details.damage-details[open][data-piece-details]')
@@ -494,10 +654,12 @@ export function persistCurrentNavigationState(overrides = {}) {
 
   const mapDisclosureEl = document.getElementById('mapDisclosure')
 
-  return saveNavigationState({
+  const snapshot = saveNavigationState({
     userId: appAuthState.user.id,
     workshopId: activeMembership?.workshop_id || appAuthState.activeWorkshopId || null,
     screen: overrides.screen || getCurrentActiveScreenName(),
+    jobListLimit: window.jobDisplayLimit || 60,
+    stockListLimit: appAuthState.stockVisibleCount || 40,
     activeJobId:
       overrides.activeJobId !== undefined
         ? overrides.activeJobId
@@ -524,12 +686,14 @@ export function persistCurrentNavigationState(overrides = {}) {
           ? Math.round(window.scrollY || 0)
           : 0
   })
+  if (capture && appRouter && snapshot) appRouter.capture(snapshot)
+  return snapshot
 }
 
-export async function restoreSavedNavigationState() {
+export async function restoreSavedNavigationState(savedOverride = null) {
   if (!appAuthState.user?.id) return false
   const activeMembership = getActiveMembership()
-  const saved = loadNavigationState({
+  const saved = savedOverride || loadNavigationState({
     userId: appAuthState.user.id,
     workshopId: activeMembership?.workshop_id || appAuthState.activeWorkshopId || null
   })
@@ -550,6 +714,9 @@ export async function restoreSavedNavigationState() {
   if (saved.screen === 'work' && saved.activeJobId && window.store?.jobs?.length) {
     const targetJob = window.store.jobs.find(j => j.id === saved.activeJobId)
     if (targetJob) {
+      const keepCurrentForm = window.active?.id === targetJob.id && window.step === saved.step &&
+        window.active?.area === saved.area && Number(window.page || 0) === saved.page &&
+        appAuthState.activePieceKey === saved.activePieceKey
       if (saved.area) {
         targetJob.area = saved.area
       }
@@ -572,8 +739,10 @@ export async function restoreSavedNavigationState() {
       window.active = targetJob
       window.store.activeId = targetJob.id
       window.screen = 'work'
-      window.fillReception?.()
-      window.showStep?.(saved.step || 'reception', false)
+      if (!keepCurrentForm) {
+        window.fillReception?.()
+        window.showStep?.(saved.step || 'reception', false)
+      }
 
       if ((saved.step || 'reception') === 'inspection') {
         window.page = Number(saved.page || 0)
@@ -581,13 +750,19 @@ export async function restoreSavedNavigationState() {
         if (mapDisclosureEl && typeof saved.mapOpen === 'boolean') {
           mapDisclosureEl.open = saved.mapOpen
         }
-        window.renderInspection?.()
+        if (!keepCurrentForm) window.renderInspection?.()
       }
 
+      const openKeys = new Set(saved.openPieceDetailsKeys || [])
+      document.querySelectorAll('details.damage-details[data-piece-details]').forEach(details => {
+        details.open = openKeys.has(details.getAttribute('data-piece-details'))
+      })
+      restorePieceDomStateAfterRender()
       renderHeaderNavigation()
 
       if (saved.scrollY > 0 && typeof window.scrollTo === 'function') {
         requestAnimationFrame(() => {
+          if (readAppRoute(window.location).name !== 'work' || appAuthState.user?.id !== saved.userId) return
           window.scrollTo({ top: saved.scrollY, behavior: 'auto' })
         })
       }
@@ -613,9 +788,18 @@ async function refreshOfflineQueueStatus() {
   renderConflictResolutionNotice()
 }
 
-function renderConflictResolutionNotice() {
-  const noticeEl = document.getElementById('notice')
-  if (!noticeEl) return
+export function renderConflictResolutionNotice() {
+  const formNotice = document.getElementById('notice')
+  if (!formNotice) return
+  // Sync messages have a separate lifetime from the current form's validation.
+  let noticeEl = document.getElementById('syncNotice')
+  if (!noticeEl) {
+    noticeEl = document.createElement('div')
+    noticeEl.id = 'syncNotice'
+    noticeEl.className = 'notice'
+    noticeEl.setAttribute('role', 'status')
+    formNotice.before(noticeEl)
+  }
 
   const conflicts = appAuthState.unresolvedConflicts || []
   if (!conflicts.length) {
@@ -706,12 +890,163 @@ function renderConflictResolutionNotice() {
   document.getElementById('resolveKeepBothBtn')?.addEventListener('click', () => handleResolve('keep_both'))
 }
 
-function renderHeaderNavigation() {
+export function leavePasswordScreen() {
+  if (!appAuthState.user || isSessionExpired(appAuthState.session)) return Promise.resolve()
+  if (readAppRoute(window.location).name === 'password') return getAppRouter().returnFromPassword()
+  hidePasswordScreen()
+  return Promise.resolve()
+}
+
+export function openMyProfile() {
+  if (!appAuthState.user || isSessionExpired(appAuthState.session)) return
+  if (readAppRoute(window.location).name === 'password') return leavePasswordScreen().then(openMyProfile)
+  clearScreenNotices()
+  hidePasswordScreen()
+  document.getElementById('myProfileDialog')?.remove()
+  const user = appAuthState.user
+  const membership = getActiveMembership()
+  const roleLabel = ROLE_LABELS[membership?.role] || 'Sin taller asignado'
+  let saved = {
+    display_name: appAuthState.profile?.display_name || user.user_metadata?.display_name || user.user_metadata?.full_name || '',
+    phone: appAuthState.profile?.phone ?? user.user_metadata?.phone ?? ''
+  }
+  const name = saved.display_name || 'Tu perfil'
+  const avatarUrl = String(user.user_metadata?.avatar_url || '')
+  const photo = /^https:\/\//i.test(avatarUrl) ? avatarUrl : ''
+  const icon = path => `<svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">${path}</svg>`
+  const backIcon = icon('<path d="m12 5-7 7 7 7M5 12h14"/>')
+  const personIcon = icon('<circle cx="12" cy="8" r="4"/><path d="M4 21v-2a8 8 0 0 1 16 0v2"/>')
+  const phoneIcon = icon('<path d="M7 3H4a1 1 0 0 0-1 1c0 9.4 7.6 17 17 17a1 1 0 0 0 1-1v-3l-5-2-2 2a14 14 0 0 1-7-7l2-2z"/>')
+  const mailIcon = icon('<rect x="3" y="5" width="18" height="14" rx="3"/><path d="m3 7 9 6 9-6"/>')
+  const shopIcon = icon('<path d="M3 21h18M5 21V8l7-5 7 5v13M9 21v-7h6v7"/>')
+  const editIcon = icon('<path d="m15 5 4 4M4 20l4-1L20 7a2.8 2.8 0 0 0-4-4L4 15z"/>')
+  const dialog = document.createElement('dialog')
+  dialog.id = 'myProfileDialog'
+  dialog.className = 'personal-profile-dialog'
+  dialog.setAttribute('aria-labelledby', 'personalProfileTitle')
+  dialog.innerHTML = `
+    <div class="personal-profile-top">
+      <button type="button" class="profile-back" id="backFromMyProfileBtn">${backIcon} Volver a la sección anterior</button>
+      <p class="eyebrow">CRASH SOLUTION · TU CUENTA</p>
+      <h2 id="personalProfileTitle">Mi perfil</h2>
+      <p>Tu información personal y tu lugar en el equipo.</p>
+    </div>
+    <div class="personal-profile-layout">
+      <aside class="personal-profile-identity" aria-label="Identidad del usuario">
+        <div class="personal-profile-avatar"><span id="personalProfileInitials">${esc(getProfileInitials(name))}</span>${photo ? `<img id="personalProfilePhoto" src="${esc(photo)}" alt="Foto de perfil" referrerpolicy="no-referrer">` : ''}</div>
+        <h3 id="personalProfileName">${esc(name)}</h3>
+        <span class="personal-profile-role">${personIcon}${esc(roleLabel)}</span>
+        <div class="personal-profile-workshop">${shopIcon}<span>Taller activo<strong>${esc(membership?.workshop?.name || 'Sin taller asignado')}</strong></span></div>
+      </aside>
+      <section class="personal-profile-details" aria-labelledby="personalInfoTitle">
+        <div class="personal-profile-section-heading"><h3 id="personalInfoTitle">Información personal</h3><p>Mantené actualizados tus datos de contacto.</p></div>
+        <div id="personalProfileAlert" class="auth-alert" role="status" aria-live="polite" hidden></div>
+        <form id="personalProfileForm">
+          <div class="personal-profile-fields">
+            <label for="personalName">${personIcon}Nombre completo<input id="personalName" name="display_name" autocomplete="name" required minlength="2" value="${esc(saved.display_name)}" readonly></label>
+            <label for="personalPhone">${phoneIcon}Teléfono<input id="personalPhone" name="phone" type="tel" autocomplete="tel" maxlength="30" value="${esc(saved.phone)}" placeholder="Sin teléfono registrado" readonly></label>
+          </div>
+          <dl class="personal-profile-contact"><div><dt>${mailIcon}Correo electrónico</dt><dd>${esc(user.email || 'Sin correo registrado')}</dd></div></dl>
+          <div class="personal-profile-actions">
+            <button type="button" class="button secondary" id="editPersonalProfileBtn">${editIcon}Editar mis datos</button>
+            <button type="submit" class="button primary" id="savePersonalProfileBtn" hidden>Guardar cambios</button>
+            <button type="button" class="button secondary" id="cancelPersonalProfileBtn" hidden>Cancelar edición</button>
+          </div>
+        </form>
+      </section>
+    </div>`
+  document.body.append(dialog)
+  const nameInput = dialog.querySelector('#personalName')
+  const phoneInput = dialog.querySelector('#personalPhone')
+  const alert = dialog.querySelector('#personalProfileAlert')
+  const saveButton = dialog.querySelector('#savePersonalProfileBtn')
+  let saving = false
+  const setEditing = editing => {
+    nameInput.readOnly = phoneInput.readOnly = !editing
+    dialog.querySelector('#editPersonalProfileBtn').hidden = editing
+    saveButton.hidden = dialog.querySelector('#cancelPersonalProfileBtn').hidden = !editing
+  }
+  const dirty = () => nameInput.value !== saved.display_name || phoneInput.value !== (saved.phone || '')
+  const close = () => {
+    if (saving) return
+    if (dirty() && !window.confirm('Tenés cambios en tu perfil sin guardar. ¿Querés descartarlos y volver?')) return
+    dialog.close()
+    dialog.remove()
+    document.getElementById('profileMenuToggle')?.focus()
+  }
+  dialog.querySelector('#backFromMyProfileBtn').onclick = close
+  dialog.addEventListener('cancel', event => { event.preventDefault(); close() })
+  dialog.querySelector('#personalProfilePhoto')?.addEventListener('error', event => { event.target.remove() }, { once: true })
+  dialog.querySelector('#editPersonalProfileBtn').onclick = () => { alert.hidden = true; setEditing(true); nameInput.focus() }
+  dialog.querySelector('#cancelPersonalProfileBtn').onclick = () => {
+    nameInput.value = saved.display_name
+    phoneInput.value = saved.phone || ''
+    alert.hidden = true
+    setEditing(false)
+  }
+  dialog.querySelector('#personalProfileForm').onsubmit = async event => {
+    event.preventDefault()
+    if (saving || nameInput.readOnly) return
+    saving = true
+    dialog.querySelectorAll('button').forEach(button => { button.disabled = true })
+    nameInput.readOnly = phoneInput.readOnly = true
+    saveButton.textContent = 'Guardando…'
+    alert.hidden = true
+    try {
+      const updated = await updatePersonalProfile({ display_name: nameInput.value, phone: phoneInput.value })
+      // Ignore a response if another account has since replaced the current session.
+      if (appAuthState.user?.id !== user.id || !dialog.isConnected) return
+      saved = { display_name: updated.display_name, phone: updated.phone || '' }
+      appAuthState.profile = updated
+      nameInput.value = saved.display_name
+      phoneInput.value = saved.phone
+      dialog.querySelector('#personalProfileName').textContent = saved.display_name
+      dialog.querySelector('#personalProfileInitials').textContent = getProfileInitials(saved.display_name)
+      renderHeaderNavigation()
+      setEditing(false)
+      alert.className = 'auth-alert success'
+      alert.textContent = 'Tus datos se guardaron correctamente.'
+    } catch (error) {
+      setEditing(true)
+      alert.className = 'auth-alert error'
+      alert.textContent = error.message
+    } finally {
+      saving = false
+      dialog.querySelectorAll('button').forEach(button => { button.disabled = false })
+      saveButton.textContent = 'Guardar cambios'
+      alert.hidden = false
+    }
+  }
+  dialog.showModal()
+}
+
+export function renderHeaderNavigation() {
   const navContainer = document.getElementById('headerAuthNav')
   if (!navContainer) return
 
-  if (!appAuthState.user || isSessionExpired(appAuthState.session)) {
-    navContainer.innerHTML = `<span class="small muted" style="color:#c7d6e4">Autenticación requerida</span>`
+  const authenticated = !!appAuthState.user && !isSessionExpired(appAuthState.session)
+  navContainer.hidden = !authenticated
+  document.querySelectorAll('.header-tools').forEach(el => {
+    el.hidden = !authenticated
+    if (!authenticated) {
+      // Remove session controls from the DOM, including legacy cached markup.
+      el.replaceChildren()
+    } else if (!el.querySelector('#saveState')) {
+      const status = document.createElement('span')
+      status.id = 'saveState'
+      status.setAttribute('role', 'status')
+      status.setAttribute('aria-live', 'polite')
+      status.textContent = window.__saveStateMessage || 'Guardado en este dispositivo'
+      el.append(status)
+    }
+  })
+  if (!authenticated) {
+    lastHeaderMarkup = ''
+    window.__headerMenuController?.abort()
+    document.getElementById('myProfileDialog')?.remove()
+    const brand = document.querySelector('.brand span:nth-child(2)')
+    if (brand) brand.innerHTML = 'CRASH SOLUTION<small>Gestión del taller</small>'
+    navContainer.innerHTML = ''
     return
   }
 
@@ -732,9 +1067,9 @@ function renderHeaderNavigation() {
     )
     .join('')
 
-  const isAdminView = !document.getElementById('adminScreen')?.hidden
-  const isProfileView = !document.getElementById('profileScreen')?.hidden
-  const isStockView = !document.getElementById('stockScreen')?.hidden
+  const currentRoute = readAppRoute(window.location).name
+  const isAdminView = currentRoute === 'admin'
+  const isStockView = currentRoute === 'stock'
 
   const connClass = !appAuthState.isOnline
     ? 'offline'
@@ -754,7 +1089,21 @@ function renderHeaderNavigation() {
           ? `En cola (${appAuthState.pendingSyncCount})`
           : 'En línea'
 
-  navContainer.innerHTML = `
+  const markup = `
+    <button type="button" id="mobileNavToggle" class="nav-pill mobile-nav-toggle" aria-expanded="false" aria-controls="primaryNavigation">☰ Menú</button>
+    <nav id="primaryNavigation" class="primary-navigation" aria-label="Navegación principal">
+    <button type="button" class="nav-pill ${['jobs', 'work'].includes(currentRoute) ? 'active' : ''}" id="navJobsBtn">Trabajos</button>
+    ${activeMembership ? `<button type="button" class="nav-pill ${isStockView ? 'active' : ''}" id="navStockBtn">Stock / Depósito</button>` : ''}
+    ${canAccessAdminPanel(role) ? `<button type="button" class="nav-pill ${isAdminView ? 'active' : ''}" id="navAdminBtn">Administración</button>` : ''}
+    </nav>
+    <div class="profile-menu-wrap">
+    <button type="button" class="profile-toggle" id="profileMenuToggle" aria-label="Abrir menú de usuario" aria-expanded="false" aria-controls="userMenu">${esc(String(displayName || 'U').charAt(0).toUpperCase())}</button>
+    <div id="userMenu" class="profile-dropdown" hidden>
+    <div class="profile-identity"><strong>${esc(displayName)}</strong><span class="role-chip ${esc(role)}">${esc(roleLabel)}</span></div>
+    <button type="button" id="navMyProfileBtn">Mi perfil</button>
+    ${activeMembership ? '<button type="button" id="navProfileBtn">Perfil y datos del taller</button>' : ''}
+    <button type="button" id="navChangePassBtn" ${currentRoute === 'password' ? 'aria-current="page"' : ''}>Cambiar contraseña</button>
+    <button type="button" id="navSettingsBtn">Configuración</button>
     <span id="connectivityBadge" class="conn-badge ${connClass}" role="status" aria-live="polite" title="Estado de conexión y sincronización">
       <span class="conn-dot"></span>
       <span>${esc(connLabel)}</span>
@@ -766,25 +1115,61 @@ function renderHeaderNavigation() {
           </select>`
         : ''
     }
-    <button type="button" class="nav-pill ${!isAdminView && !isProfileView && !isStockView ? 'active' : ''}" id="navJobsBtn">Trabajos</button>
-    ${
-      activeMembership
-        ? `<button type="button" class="nav-pill ${isStockView ? 'active' : ''}" id="navStockBtn">Stock / Depósito</button>
-           <button type="button" class="nav-pill ${isProfileView ? 'active' : ''}" id="navProfileBtn">Perfil del taller</button>`
-        : ''
-    }
-    <button type="button" class="nav-pill ${isAdminView ? 'active' : ''}" id="navAdminBtn">Administración</button>
-    <span class="user-badge" title="${esc(appAuthState.user.email)}">
-      <span>${esc(displayName)}</span>
-      <span class="role-chip ${esc(role)}">${esc(roleLabel)}</span>
-    </span>
-    <button type="button" class="nav-pill" id="navChangePassBtn" title="Actualizar contraseña">Clave</button>
-    <button type="button" class="nav-pill" id="navLogoutBtn" title="Cerrar sesión">Salir</button>
+    <button type="button" id="navLogoutBtn">Cerrar sesión</button>
+    </div></div>
   `
+  if (lastHeaderMarkup === markup && navContainer.dataset.navBound === 'true' && navContainer.querySelector('#profileMenuToggle')) return
+  navContainer.innerHTML = markup
+  navContainer.dataset.navBound = 'true'
+  lastHeaderMarkup = markup
+  navContainer.querySelectorAll('.primary-navigation .active').forEach(button => button.setAttribute('aria-current', 'page'))
+
+  const closeMenus = () => {
+    document.getElementById('userMenu').hidden = true
+    document.getElementById('profileMenuToggle').setAttribute('aria-expanded', 'false')
+    document.getElementById('primaryNavigation').classList.remove('is-open')
+    document.getElementById('mobileNavToggle').setAttribute('aria-expanded', 'false')
+  }
+  document.getElementById('profileMenuToggle').onclick = () => {
+    const menu = document.getElementById('userMenu')
+    const opening = menu.hidden
+    closeMenus()
+    menu.hidden = !opening
+    document.getElementById('profileMenuToggle').setAttribute('aria-expanded', String(opening))
+  }
+  document.getElementById('mobileNavToggle').onclick = () => {
+    const opening = !document.getElementById('primaryNavigation').classList.contains('is-open')
+    closeMenus()
+    document.getElementById('primaryNavigation').classList.toggle('is-open', opening)
+    document.getElementById('mobileNavToggle').setAttribute('aria-expanded', String(opening))
+  }
+  // Replace listeners on each render to avoid accumulating document handlers.
+  window.__headerMenuController?.abort()
+  const controller = new AbortController()
+  window.__headerMenuController = controller
+  document.addEventListener('click', e => { if (!navContainer.contains(e.target)) closeMenus() }, { signal: controller.signal })
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { closeMenus(); document.getElementById('profileMenuToggle')?.focus() }
+  }, { signal: controller.signal })
+  navContainer.addEventListener('click', e => {
+    if (e.target.closest('#userMenu button, #primaryNavigation button')) closeMenus()
+  }, { signal: controller.signal })
+  document.getElementById('navSettingsBtn').onclick = () => { window.openSettings?.() }
+  document.getElementById('navMyProfileBtn').onclick = openMyProfile
 
   document.getElementById('activeWorkshopSelect')?.addEventListener('change', async e => {
+    const previousMembership = getActiveMembership()
+    if (window.active?.rec?.cliente?.trim() && window.active?.rec?.patente?.trim() && previousMembership) {
+      clearTimeout(window.__jobCloudTimer)
+      window.__jobCloudTimer = null
+      await enqueueJobSyncOperation({ userId: appAuthState.user.id, workshopId: previousMembership.workshop_id, job: window.active })
+    }
     appAuthState.activeWorkshopId = e.target.value
+    clearWorkshopReadState()
+    privateReadCache.activate({ userId: appAuthState.user?.id, workshopId: appAuthState.activeWorkshopId })
     localStorage.setItem('mitaller_active_workshop_id', appAuthState.activeWorkshopId)
+    if (window.store) { window.store.jobs = []; window.store.activeId = null }
+    window.active = null
     await syncActiveWorkshopToLegacyStore()
     await loadWorkshopJobsFromSupabase()
     if (!document.getElementById('adminScreen')?.hidden) {
@@ -794,25 +1179,11 @@ function renderHeaderNavigation() {
     } else if (!document.getElementById('stockScreen')?.hidden) {
       await renderStockScreen()
     }
+    await enforceRouteProtection()
   })
 
   document.getElementById('navJobsBtn')?.addEventListener('click', () => {
-    if (
-      window.location.hash === '#/admin' ||
-      window.location.hash === '#/perfil' ||
-      window.location.hash === '#/stock' ||
-      window.location.pathname.endsWith('/admin')
-    ) {
-      history.pushState(null, '', './')
-    }
-    const adminScreen = document.getElementById('adminScreen')
-    const profileScreen = document.getElementById('profileScreen')
-    const stockScreen = document.getElementById('stockScreen')
-    if (adminScreen) adminScreen.hidden = true
-    if (profileScreen) profileScreen.hidden = true
-    if (stockScreen) stockScreen.hidden = true
-    window.showJobs?.()
-    renderHeaderNavigation()
+    navigateAppRoute({ name: 'jobs' })
   })
 
   document.getElementById('navStockBtn')?.addEventListener('click', () => {
@@ -828,26 +1199,23 @@ function renderHeaderNavigation() {
   })
 
   document.getElementById('navChangePassBtn')?.addEventListener('click', () => {
-    appAuthState.authMode = 'update-password'
-    const authScreen = document.getElementById('authScreen')
-    const mainApp = document.getElementById('mainAppContainer')
-    if (mainApp) mainApp.hidden = true
-    if (authScreen) {
-      authScreen.hidden = false
-      renderAuthScreen()
-    }
+    navigateAppRoute({ name: 'password' })
   })
 
   document.getElementById('navLogoutBtn')?.addEventListener('click', handleLogout)
 }
 
-export async function syncActiveWorkshopToLegacyStore() {
+export async function syncActiveWorkshopToLegacyStore({ useMembership = false } = {}) {
+  const expectedScope = routeScope()
+  const cacheToken = privateReadCache.token()
   const activeMembership = getActiveMembership()
   if (!activeMembership?.workshop || !window.store) return
   let ws = activeMembership.workshop
 
   try {
-    const freshProfile = await fetchWorkshopProfile(ws.id)
+    const freshProfile = useMembership
+      ? rememberWorkshopProfile({ ...ws, logo_url: await resolveWorkshopLogoUrl(ws.logo_path) }, cacheToken)
+      : await fetchWorkshopProfile(ws.id)
     if (freshProfile) {
       ws = freshProfile
       activeMembership.workshop = freshProfile
@@ -859,6 +1227,7 @@ export async function syncActiveWorkshopToLegacyStore() {
     appAuthState.activeWorkshopProfile = ws
   }
 
+  if (routeScope() !== expectedScope) return
   window.store.shop = {
     ...window.store.shop,
     id: ws.id,
@@ -989,6 +1358,15 @@ function syncActiveJobReferenceInMemory() {
 }
 
 export async function loadWorkshopJobsFromSupabase() {
+  const scope = routeScope()
+  if (jobsLoadPromise && jobsLoadScope === scope) return jobsLoadPromise
+  jobsLoadScope = scope
+  const promise = loadWorkshopJobsUncached().finally(() => { if (jobsLoadPromise === promise) jobsLoadPromise = null })
+  jobsLoadPromise = promise
+  return promise
+}
+
+async function loadWorkshopJobsUncached() {
   const activeMembership = getActiveMembership()
   if (!appAuthState.user?.id || !activeMembership?.workshop_id || !window.store) return
 
@@ -1000,6 +1378,7 @@ export async function loadWorkshopJobsFromSupabase() {
 
   // 2. Cargar inmediatamente los trabajos persistidos en IndexedDB para este usuario y taller (permite uso inmediato sin internet)
   const localIndexedDbJobs = await getOfflineJobsForScope(userId, workshopId)
+  if (appAuthState.user?.id !== userId || getActiveMembership()?.workshop_id !== workshopId) return
   if (localIndexedDbJobs.length > 0) {
     window.store.jobs = localIndexedDbJobs.map(j => (window.adaptJob ? window.adaptJob(j) : j))
     syncActiveJobReferenceInMemory()
@@ -1025,18 +1404,12 @@ export async function loadWorkshopJobsFromSupabase() {
   await syncPendingJobsWithSupabase()
 
   try {
-    const { data, error } = await supabase
+    const data = await fetchAllPages(() => supabase
       .from('jobs')
       .select('id, workshop_id, job_number, status, revision, payload, customer_name, vehicle_plate, created_at, updated_at')
       .eq('workshop_id', workshopId)
-      .order('updated_at', { ascending: false })
-
-    if (error) {
-      if (String(error.message || '').toLowerCase().includes('jwt expired')) {
-        await handleExpiredSession()
-      }
-      return
-    }
+      .order('updated_at', { ascending: false }).order('id', { ascending: true }))
+    if (appAuthState.user?.id !== userId || getActiveMembership()?.workshop_id !== workshopId) return
 
     const remoteJobs = (data || []).map(row => {
       const payload = row.payload && typeof row.payload === 'object' ? row.payload : {}
@@ -1078,6 +1451,7 @@ export async function loadWorkshopJobsFromSupabase() {
     }
 
     const mergedJobs = await getOfflineJobsForScope(userId, workshopId)
+    if (appAuthState.user?.id !== userId || getActiveMembership()?.workshop_id !== workshopId) return
     window.store.jobs = mergedJobs.map(j => (window.adaptJob ? window.adaptJob(j) : j))
     syncActiveJobReferenceInMemory()
     if (window.screen === 'jobs') {
@@ -1093,6 +1467,7 @@ export async function loadWorkshopJobsFromSupabase() {
       saveStateEl.textContent = `Taller: ${activeMembership.workshop.name}`
     }
   } catch (err) {
+    if (String(err?.message || '').toLowerCase().includes('jwt expired')) await handleExpiredSession()
     console.warn('Error al cargar trabajos desde Supabase (usando copia local IndexedDB):', err)
   }
 }
@@ -1134,7 +1509,8 @@ export async function saveActiveJobToSupabase(job) {
 // ============================================================================
 // DEV-19: Pantalla de Perfil del Taller + Logo en Supabase Storage + PDF
 // ============================================================================
-export async function openProfileScreen() {
+export async function openProfileScreen({ fromRoute = false } = {}) {
+  if (!fromRoute) return navigateAppRoute({ name: 'profile' })
   if (!appAuthState.user || isSessionExpired(appAuthState.session)) {
     await enforceRouteProtection()
     return
@@ -1144,7 +1520,6 @@ export async function openProfileScreen() {
     await openAdminScreen()
     return
   }
-  history.replaceState(null, '', '#/perfil')
   const jobsScreen = document.getElementById('jobsScreen')
   const workScreen = document.getElementById('workScreen')
   const adminScreen = document.getElementById('adminScreen')
@@ -1161,6 +1536,7 @@ export async function openProfileScreen() {
 }
 
 export async function renderProfileScreen() {
+  const expectedScope = routeScope()
   const profileScreen = document.getElementById('profileScreen')
   if (!profileScreen) return
 
@@ -1173,6 +1549,7 @@ export async function renderProfileScreen() {
   let ws = appAuthState.activeWorkshopProfile || activeMembership.workshop
   try {
     ws = await fetchWorkshopProfile(activeMembership.workshop.id)
+    if (routeScope() !== expectedScope) return
     appAuthState.activeWorkshopProfile = ws
     activeMembership.workshop = ws
   } catch (err) {
@@ -1182,6 +1559,7 @@ export async function renderProfileScreen() {
   const canEdit = canAccessAdminPanel(activeMembership.role)
   const previewHeaderHtml = buildBudgetWorkshopHeaderHtml(ws, 'OT-DEMO01', '03/11/2026', '18/11/2026')
 
+  if (routeScope() !== expectedScope) return
   profileScreen.innerHTML = `
     <div class="page-heading">
       <div>
@@ -1225,11 +1603,7 @@ export async function renderProfileScreen() {
                       Subir / actualizar logo
                       <input type="file" id="workshopLogoInput" accept="image/png,image/jpeg,image/webp" hidden>
                     </label>
-                    ${
-                      ws.logo_path
-                        ? `<button type="button" class="button danger small-btn" id="removeLogoBtn">Quitar logo</button>`
-                        : ''
-                    }
+                    <button type="button" class="button danger small-btn" id="removeLogoBtn" ${ws.logo_path ? '' : 'hidden'}>Quitar logo</button>
                   </div>`
                 : ''
             }
@@ -1304,10 +1678,7 @@ export async function renderProfileScreen() {
   `
 
   document.getElementById('backFromProfileBtn')?.addEventListener('click', () => {
-    history.pushState(null, '', './')
-    profileScreen.hidden = true
-    window.showJobs?.()
-    renderHeaderNavigation()
+    navigateAppRoute({ name: 'jobs' })
   })
 
   // Formateo automático de CUIT al salir del campo y actualización de vista previa en vivo
@@ -1340,35 +1711,33 @@ export async function renderProfileScreen() {
   })
 
   document.getElementById('workshopLogoInput')?.addEventListener('change', async e => {
+    if (!canEdit || e.target.disabled) return
     const file = e.target.files?.[0]
     if (!file) return
+    e.target.disabled = true
     setProfileAlert('info', 'Subiendo y procesando logo del taller…')
     try {
-      const { logoPath, logoUrl } = await uploadWorkshopLogo(ws.id, file)
-      const updated = await updateWorkshopProfile(ws.id, {
-        name: document.getElementById('profName')?.value || ws.name,
-        legal_name: document.getElementById('profLegalName')?.value ?? ws.legal_name,
-        tax_id: document.getElementById('profTaxId')?.value ?? ws.tax_id,
-        phone: document.getElementById('profPhone')?.value ?? ws.phone,
-        whatsapp: document.getElementById('profWhatsapp')?.value ?? ws.whatsapp,
-        email: document.getElementById('profEmail')?.value ?? ws.email,
-        address: document.getElementById('profAddress')?.value ?? ws.address,
-        logo_path: logoPath
-      })
-      ws = { ...updated, logo_url: logoUrl || updated.logo_url }
+      ws = await uploadWorkshopLogo(ws.id, file)
       appAuthState.activeWorkshopProfile = ws
       activeMembership.workshop = ws
       await syncActiveWorkshopToLegacyStore()
-      await renderProfileScreen()
-      setProfileAlert('success', 'Logo del taller actualizado correctamente.')
+      // Keep unsaved form fields intact while updating the stored logo preview.
+      const preview = document.getElementById('logoPreviewContainer')
+      if (preview) preview.innerHTML = `<img src="${esc(ws.logo_url)}" alt="Logo de ${esc(ws.name)}" id="workshopLogoImg">`
+      const removeButton = document.getElementById('removeLogoBtn')
+      if (removeButton) removeButton.hidden = false
+      updateLivePreview()
+      setProfileAlert('success', 'Logo guardado correctamente')
     } catch (err) {
       setProfileAlert('error', err.message || 'No se pudo subir el logo del taller.')
     } finally {
       e.target.value = ''
+      e.target.disabled = false
     }
   })
 
   document.getElementById('removeLogoBtn')?.addEventListener('click', async () => {
+    if (!canEdit) return
     setProfileAlert('', '')
     try {
       const updated = await updateWorkshopProfile(ws.id, {
@@ -1379,7 +1748,10 @@ export async function renderProfileScreen() {
       appAuthState.activeWorkshopProfile = ws
       activeMembership.workshop = ws
       await syncActiveWorkshopToLegacyStore()
-      await renderProfileScreen()
+      const preview = document.getElementById('logoPreviewContainer')
+      if (preview) preview.innerHTML = '<span class="logo-placeholder">Sin logo<br>cargado</span>'
+      document.getElementById('removeLogoBtn').hidden = true
+      updateLivePreview()
       setProfileAlert('success', 'Logo quitado del perfil del taller.')
     } catch (err) {
       setProfileAlert('error', err.message || 'No se pudo quitar el logo.')
@@ -1444,7 +1816,8 @@ export async function renderProfileScreen() {
 // ============================================================================
 // DEV-22: Sistema de Stock / Inventario de Taller
 // ============================================================================
-export async function openStockScreen() {
+export async function openStockScreen({ fromRoute = false } = {}) {
+  if (!fromRoute) return navigateAppRoute({ name: 'stock' })
   if (!appAuthState.user || isSessionExpired(appAuthState.session)) {
     await enforceRouteProtection()
     return
@@ -1454,7 +1827,6 @@ export async function openStockScreen() {
     await openAdminScreen()
     return
   }
-  history.replaceState(null, '', '#/stock')
   const jobsScreen = document.getElementById('jobsScreen')
   const workScreen = document.getElementById('workScreen')
   const profileScreen = document.getElementById('profileScreen')
@@ -1471,6 +1843,7 @@ export async function openStockScreen() {
 }
 
 export async function renderStockScreen() {
+  const expectedScope = routeScope()
   const stockScreen = document.getElementById('stockScreen')
   if (!stockScreen) return
 
@@ -1486,6 +1859,7 @@ export async function renderStockScreen() {
       fetchWorkshopStock(ws.id),
       fetchStockMovements(ws.id, null, 60)
     ])
+    if (routeScope() !== expectedScope) return
     appAuthState.stockItems = items
     appAuthState.stockMovements = movements
   } catch (err) {
@@ -1494,15 +1868,12 @@ export async function renderStockScreen() {
 
   const activeItems = appAuthState.stockItems.filter(i => !i.archived_at)
   const lowStockItems = activeItems.filter(i => isLowStock(i))
-  const totalStockValue = activeItems.reduce(
-    (acc, i) => acc + (Number(i.quantity) || 0) * (Number(i.sale_price) || 0),
-    0
-  )
 
   const editing = appAuthState.editingStockItem
   const movItem = appAuthState.movementTargetItem
   const f = appAuthState.stockFilters
 
+  if (routeScope() !== expectedScope) return
   stockScreen.innerHTML = `
     <div class="page-heading">
       <div>
@@ -1519,7 +1890,7 @@ export async function renderStockScreen() {
     <div id="stockAlertBox" class="auth-alert" role="alert" hidden></div>
 
     <!-- Estadísticas rápidas del depósito -->
-    <div class="dashboard-stats">
+    <div class="dashboard-stats stock-summary-stats">
       <div class="dashboard-stat">
         <span>Productos activos</span>
         <b>${activeItems.length}</b>
@@ -1527,10 +1898,6 @@ export async function renderStockScreen() {
       <div class="dashboard-stat" style="cursor:pointer" id="filterLowStockStatBtn" title="Filtrar productos con alerta de stock bajo">
         <span>Alertas de stock mínimo</span>
         <b style="color:${lowStockItems.length > 0 ? '#a95312' : 'inherit'}">${lowStockItems.length}</b>
-      </div>
-      <div class="dashboard-stat">
-        <span>Valorizado (precio venta)</span>
-        <b>${window.money ? window.money(totalStockValue) : `$${totalStockValue.toLocaleString('es-AR')}`}</b>
       </div>
     </div>
 
@@ -1625,9 +1992,6 @@ export async function renderStockScreen() {
           </label>
           <label>Precio de compra (ARS)
             <input id="stPurchasePrice" type="number" min="0" step="0.01" value="${editing?.purchase_price ?? 0}">
-          </label>
-          <label>Precio de venta (ARS)
-            <input id="stSalePrice" type="number" min="0" step="0.01" value="${editing?.sale_price ?? 0}">
           </label>
           <label>Stock mínimo (aviso de faltante)
             <input id="stMinQty" type="number" min="0" step="0.01" value="${editing?.minimum_quantity ?? 1}">
@@ -1739,10 +2103,7 @@ export async function renderStockScreen() {
   renderMovementHistorySection()
 
   document.getElementById('backFromStockBtn')?.addEventListener('click', () => {
-    history.pushState(null, '', './')
-    stockScreen.hidden = true
-    window.showJobs?.()
-    renderHeaderNavigation()
+    navigateAppRoute({ name: 'jobs' })
   })
 
   document.getElementById('openNewStockItemBtn')?.addEventListener('click', () => {
@@ -1845,7 +2206,6 @@ export async function renderStockScreen() {
       unit: document.getElementById('stUnit')?.value,
       location: document.getElementById('stLocation')?.value,
       purchase_price: document.getElementById('stPurchasePrice')?.value,
-      sale_price: document.getElementById('stSalePrice')?.value,
       minimum_quantity: document.getElementById('stMinQty')?.value,
       initial_quantity: document.getElementById('stInitialQty')?.value ?? 0,
       description: document.getElementById('stDescription')?.value,
@@ -1974,6 +2334,11 @@ function renderStockItemsGrid() {
   if (!grid) return
 
   const filtered = filterStockItems(appAuthState.stockItems, appAuthState.stockFilters)
+  const filterKey = JSON.stringify([routeScope(), appAuthState.stockFilters])
+  if (appAuthState.stockRenderFilterKey !== filterKey) {
+    appAuthState.stockVisibleCount = 40
+    appAuthState.stockRenderFilterKey = filterKey
+  }
 
   if (!filtered.length) {
     grid.innerHTML = `
@@ -1988,7 +2353,7 @@ function renderStockItemsGrid() {
 
   const fmtMoney = v => (window.money ? window.money(v) : `$${Number(v || 0).toLocaleString('es-AR')}`)
 
-  grid.innerHTML = filtered
+  grid.innerHTML = filtered.slice(0, appAuthState.stockVisibleCount)
     .map(item => {
       const low = isLowStock(item)
       const archived = Boolean(item.archived_at)
@@ -2019,9 +2384,8 @@ function renderStockItemsGrid() {
                 <span class="stock-qty-value">${item.quantity} <small style="font-size:13px;font-weight:700">${esc(item.unit || 'un.')}</small></span>
               </div>
               <div style="text-align:right">
-                <span class="small muted" style="display:block">Precio venta</span>
-                <b style="font-size:14px">${fmtMoney(item.sale_price)}</b>
-                <small class="muted" style="display:block;font-size:10px">Compra: ${fmtMoney(item.purchase_price)}</small>
+                <span class="small muted" style="display:block">Precio de compra</span>
+                <b style="font-size:14px">${fmtMoney(item.purchase_price)}</b>
               </div>
             </div>
 
@@ -2080,6 +2444,14 @@ function renderStockItemsGrid() {
     })
   })
 
+  if (filtered.length > appAuthState.stockVisibleCount) {
+    const more = document.createElement('button')
+    more.type = 'button'
+    more.className = 'button secondary list-load-more'
+    more.textContent = `Mostrar más productos (${appAuthState.stockVisibleCount} de ${filtered.length})`
+    more.onclick = () => { appAuthState.stockVisibleCount += 40; renderStockItemsGrid(); persistCurrentNavigationState() }
+    grid.append(more)
+  }
   grid.querySelectorAll('[data-archive-item]').forEach(btn => {
     btn.addEventListener('click', async () => {
       const activeMembership = getActiveMembership()
@@ -2145,12 +2517,12 @@ function renderMovementHistorySection() {
 // ============================================================================
 // DEV-20: Panel de Administración (/admin) con roles owner | admin | staff
 // ============================================================================
-export async function openAdminScreen() {
+export async function openAdminScreen({ fromRoute = false } = {}) {
+  if (!fromRoute) return navigateAppRoute({ name: 'admin' })
   if (!appAuthState.user || isSessionExpired(appAuthState.session)) {
     await enforceRouteProtection()
     return
   }
-  history.replaceState(null, '', '#/admin')
   const jobsScreen = document.getElementById('jobsScreen')
   const workScreen = document.getElementById('workScreen')
   const profileScreen = document.getElementById('profileScreen')
@@ -2167,6 +2539,7 @@ export async function openAdminScreen() {
 }
 
 export async function renderAdminScreen() {
+  const expectedScope = routeScope()
   const adminScreen = document.getElementById('adminScreen')
   if (!adminScreen) return
 
@@ -2182,6 +2555,7 @@ export async function renderAdminScreen() {
         fetchAdminWorkshopMembers(activeWorkshop.id),
         fetchKnownUserProfiles()
       ])
+      if (routeScope() !== expectedScope) return
       appAuthState.adminMembers = members
       appAuthState.knownProfiles = profiles
     } catch (err) {
@@ -2193,6 +2567,7 @@ export async function renderAdminScreen() {
 
   const ownerCount = appAuthState.adminMembers.filter(m => m.role === 'owner').length
 
+  if (routeScope() !== expectedScope) return
   adminScreen.innerHTML = `
     <div class="page-heading">
       <div>
@@ -2388,8 +2763,8 @@ export async function renderAdminScreen() {
                     <details class="quiet-details">
                       <summary>+ Invitar nuevo integrante por correo electrónico</summary>
                       <form id="inviteUserForm" class="form-grid" style="margin-top:12px">
-                        <label>Nombre y apellido <span class="required">*</span>
-                          <input id="invName" required placeholder="Ej. Carlos Gómez">
+                        <label>Nombre y apellido (opcional)
+                          <input id="invName" maxlength="100" autocomplete="name" placeholder="Ej. Carlos Gómez">
                         </label>
                         <label>Teléfono
                           <input id="invPhone" type="tel" placeholder="Opcional">
@@ -2427,10 +2802,7 @@ export async function renderAdminScreen() {
   })
 
   document.getElementById('backFromAdminBtn')?.addEventListener('click', () => {
-    history.pushState(null, '', './')
-    adminScreen.hidden = true
-    window.showJobs?.()
-    renderHeaderNavigation()
+    navigateAppRoute({ name: 'jobs' })
   })
 
   document.getElementById('copyMyUuidBtn')?.addEventListener('click', () => {
@@ -2571,10 +2943,12 @@ export async function renderAdminScreen() {
     e.preventDefault()
     if (!activeWorkshop) return
     const btn = document.getElementById('inviteUserBtn')
+    if (btn?.disabled) return
     setAdminAlert('', '')
-    if (btn) btn.disabled = true
+    if (btn) { btn.disabled = true; btn.textContent = 'Procesando invitación…' }
+    const invitationScope = routeScope()
     try {
-      await inviteOrCreateWorkshopUser({
+      const result = await inviteOrCreateWorkshopUser({
         callerId: appAuthState.user?.id,
         callerRole,
         workshopId: activeWorkshop.id,
@@ -2583,17 +2957,22 @@ export async function renderAdminScreen() {
         email: document.getElementById('invEmail')?.value,
         role: document.getElementById('invRole')?.value
       })
+      if (routeScope() !== invitationScope) return
       await renderAdminScreen()
-      setAdminAlert('success', 'Invitación enviada por correo electrónico y usuario vinculado al taller.')
+      setAdminAlert('success', result.duplicateSuppressed
+        ? 'Esta invitación ya fue procesada. No se envió otro correo.'
+        : 'Invitación procesada y acceso al taller asignado. El integrante debe abrir el enlace del correo para configurar su contraseña; puede revisar también Spam.')
     } catch (err) {
+      if (routeScope() !== invitationScope) return
       setAdminAlert('error', err.message || 'No se pudo enviar la invitación.')
     } finally {
-      if (btn) btn.disabled = false
+      if (btn) { btn.disabled = false; btn.textContent = 'Enviar invitación por correo' }
     }
   })
 }
 
 async function handleExpiredSession() {
+  privateReadCache.clear()
   appAuthState.session = null
   appAuthState.user = null
   appAuthState.profile = null
@@ -2606,17 +2985,9 @@ async function handleExpiredSession() {
 export async function enforceRouteProtection(expiredMessage = '') {
   const authScreen = document.getElementById('authScreen')
   const mainApp = document.getElementById('mainAppContainer')
-  const adminScreen = document.getElementById('adminScreen')
-  const profileScreen = document.getElementById('profileScreen')
-  const stockScreen = document.getElementById('stockScreen')
-
-  if (window.location.hash === '#update-password') {
-    appAuthState.authMode = 'update-password'
-  }
-
   const hasValidSession = appAuthState.session && !isSessionExpired(appAuthState.session)
-
-  if (!hasValidSession || appAuthState.authMode === 'update-password') {
+  if (!hasValidSession) {
+    if (appAuthState.authMode === 'update-password') appAuthState.authMode = 'login'
     if (mainApp) mainApp.hidden = true
     if (authScreen) {
       authScreen.hidden = false
@@ -2627,37 +2998,35 @@ export async function enforceRouteProtection(expiredMessage = '') {
     return
   }
 
-  if (authScreen) authScreen.hidden = true
-  if (mainApp) mainApp.hidden = false
-
-  const wantsAdmin =
-    window.location.pathname.endsWith('/admin') ||
-    window.location.hash === '#/admin' ||
-    appAuthState.memberships.length === 0
-
-  const wantsProfile = window.location.hash === '#/perfil'
-  const wantsStock = window.location.hash === '#/stock'
-
-  if (wantsAdmin) {
-    await openAdminScreen()
-  } else if (wantsProfile) {
-    await openProfileScreen()
-  } else if (wantsStock) {
-    await openStockScreen()
-  } else {
-    const restored = await restoreSavedNavigationState()
-    if (!restored) {
-      if (adminScreen) adminScreen.hidden = true
-      if (profileScreen) profileScreen.hidden = true
-      if (stockScreen) stockScreen.hidden = true
-      window.showJobs?.()
-      persistCurrentNavigationState({ screen: 'jobs', activeJobId: null })
-      renderHeaderNavigation()
+  const router = getAppRouter()
+  if (routeInitializedFor !== routeScope() || initialRecoveryRequested) {
+    routeInitializedFor = routeScope()
+    const saved = loadNavigationState({ userId: appAuthState.user.id, workshopId: getActiveMembership()?.workshop_id })
+    let route = readAppRoute(window.location)
+    if (initialRecoveryRequested) route = { name: 'password' }
+    else if (!window.location.hash && !window.location.pathname.endsWith('/admin')) {
+      route = saved ? routeForSnapshot(saved) : { name: appAuthState.memberships.length ? 'jobs' : 'admin' }
     }
+    const recovering = initialRecoveryRequested
+    initialRecoveryRequested = false
+    if (!recovering && router.state() && routeHash(route) === window.location.hash) return router.sync({ force: true })
+    return router.navigate(route, { replace: true, snapshot: saved, returnRoute: routeForSnapshot(saved) })
   }
+  return router.sync({ force: true })
 }
 
 async function onSessionEstablished(session) {
+  if (pendingSessionInitialization && pendingSessionInitialization.userId === session?.user?.id) return pendingSessionInitialization.promise
+  const promise = initializeAuthenticatedSession(session).finally(() => {
+    if (pendingSessionInitialization?.promise === promise) pendingSessionInitialization = null
+  })
+  pendingSessionInitialization = { userId: session?.user?.id, promise }
+  return promise
+}
+
+async function initializeAuthenticatedSession(session) {
+  privateReadCache.clear()
+  clearWorkshopReadState()
   appAuthState.session = session
   appAuthState.user = session?.user || null
 
@@ -2671,8 +3040,11 @@ async function onSessionEstablished(session) {
     // Desbloquear únicamente los datos locales asociados a este propietario autenticado
     await unlockOfflineDataForAuthenticatedOwner(appAuthState.user.id)
 
-    appAuthState.profile = await ensureUserProfile(appAuthState.user)
-    appAuthState.memberships = await fetchUserWorkshops(appAuthState.user.id)
+    const userId = appAuthState.user.id
+    const [profile, memberships] = await Promise.all([ensureUserProfile(appAuthState.user), fetchUserWorkshops(userId)])
+    if (appAuthState.user?.id !== userId) return
+    appAuthState.profile = profile
+    appAuthState.memberships = memberships
 
     if (
       appAuthState.memberships.length > 0 &&
@@ -2682,8 +3054,10 @@ async function onSessionEstablished(session) {
       localStorage.setItem('mitaller_active_workshop_id', appAuthState.activeWorkshopId)
     }
 
-    await syncActiveWorkshopToLegacyStore()
+    privateReadCache.activate({ userId, workshopId: getActiveMembership()?.workshop_id })
+    await syncActiveWorkshopToLegacyStore({ useMembership: true })
     await loadWorkshopJobsFromSupabase()
+    if (appAuthState.user?.id !== userId) return
     appAuthState.isSessionBootstrapped = true
   } catch (err) {
     console.warn('Error inicializando perfil y talleres del usuario:', err)
@@ -2742,13 +3116,14 @@ function restorePieceDomStateAfterRender() {
   }
 }
 
-function wireNavigationPersistence() {
+export function wireNavigationPersistence() {
   if (window.__navPersistenceWrapped) return
   window.__navPersistenceWrapped = true
 
   const origShowJobs = window.showJobs
   if (typeof origShowJobs === 'function') {
     window.showJobs = function (...args) {
+      if (!routeRenderingDepth && appAuthState.user) return navigateAppRoute({ name: 'jobs' })
       const res = origShowJobs.apply(this, args)
       persistCurrentNavigationState({ screen: 'jobs', activeJobId: null })
       return res
@@ -2758,6 +3133,15 @@ function wireNavigationPersistence() {
   const origOpenJob = window.openJob
   if (typeof origOpenJob === 'function') {
     window.openJob = function (id, step = 'reception') {
+      if (!routeRenderingDepth && appAuthState.user) {
+        const target = window.store?.jobs?.find(job => job.id === id)
+        if (!target) return
+        const snapshot = buildNavigationSnapshot({
+          userId: appAuthState.user.id, workshopId: getActiveMembership()?.workshop_id,
+          screen: 'work', activeJobId: id, step, area: target.area
+        })
+        return navigateAppRoute({ name: 'work', jobId: id, step }, { snapshot })
+      }
       appAuthState.activePieceKey = null
       appAuthState.openPieceDetailsKeys = []
       const res = origOpenJob.call(this, id, step)
@@ -2777,11 +3161,16 @@ function wireNavigationPersistence() {
   const origShowStep = window.showStep
   if (typeof origShowStep === 'function') {
     window.showStep = function (next, validate = true) {
+      if (!routeRenderingDepth) persistCurrentNavigationState()
       const res = origShowStep.call(this, next, validate)
-      persistCurrentNavigationState({
+      if (window.step === 'budget') prepareBudgetDelivery().catch(() => {})
+      const snapshot = persistCurrentNavigationState({
         screen: 'work',
         step: window.step || next
-      })
+      }, { capture: Boolean(routeRenderingDepth) })
+      if (!routeRenderingDepth && window.active && window.step === next) {
+        navigateAppRoute({ name: 'work', jobId: window.active.id, step: next }, { snapshot, captureDeparture: false })
+      }
       return res
     }
   }
@@ -2898,7 +3287,7 @@ function wireEnhancedBudgetAndSettings() {
     }
 
     // DEV-25: Opción B.1 — Generar y descargar archivo PDF real (.pdf) con logo, CUIT, taller, cliente, vehículo, trabajos y total
-    window.downloadBudgetPdfAction = function () {
+    window.downloadBudgetPdfAction = async function () {
       if (!window.quoteValid?.()) return
       const j = window.active
       if (!j) return
@@ -2907,7 +3296,8 @@ function wireEnhancedBudgetAndSettings() {
       window.saveLocal?.()
 
       try {
-        const res = downloadBudgetPdf(j, shop, document)
+        const module = await prepareBudgetDelivery()
+        const res = module.downloadBudgetPdf(j, shop, document)
         setBudgetDeliveryFeedback('success', res.userMessage)
         window.toast?.(res.userMessage)
       } catch (err) {
@@ -2925,7 +3315,12 @@ function wireEnhancedBudgetAndSettings() {
       window.saveLocal?.()
 
       try {
-        const res = await shareBudgetPdf(j, shop, {
+        if (!budgetDeliveryModule) {
+          await prepareBudgetDelivery()
+          setBudgetDeliveryFeedback('info', 'PDF preparado. Tocá Compartir PDF para elegir la aplicación.')
+          return
+        }
+        const res = await budgetDeliveryModule.shareBudgetPdf(j, shop, {
           navigatorObj: window.navigator,
           windowObj: window,
           documentObj: document
@@ -3028,14 +3423,12 @@ function wireEnhancedBudgetAndSettings() {
   window.openSettings = function () {
     if (appAuthState.user && getActiveMembership()) {
       openProfileScreen()
-    } else {
-      const dlg = document.getElementById('settingsDialog')
-      if (dlg) dlg.showModal()
     }
   }
 }
 
 export async function initAuthAndAdmin() {
+  initialRecoveryRequested = initialRecoveryRequested || isPasswordSetupCallback(window.location)
   wireEnhancedBudgetAndSettings()
 
   if (!isSupabaseConfigured || !supabase) {
@@ -3080,11 +3473,14 @@ export async function initAuthAndAdmin() {
     if (event === 'PASSWORD_RECOVERY') {
       appAuthState.session = session
       appAuthState.user = session?.user || null
-      appAuthState.authMode = 'update-password'
+      initialRecoveryRequested = true
       await enforceRouteProtection()
       return
     }
     if (event === 'SIGNED_OUT') {
+      privateReadCache.clear()
+      clearWorkshopReadState()
+      appAuthState.authMode = 'login'
       const prevUserId = appAuthState.user?.id || null
       const activeMembership = getActiveMembership()
       await lockOfflineDataOnLogout({
@@ -3107,7 +3503,8 @@ export async function initAuthAndAdmin() {
       appAuthState.unresolvedConflicts = []
       appAuthState.activePieceKey = null
       appAuthState.openPieceDetailsKeys = []
-      await enforceRouteProtection()
+      routeInitializedFor = null
+      await getAppRouter().navigate({ name: 'jobs' }, { replace: true })
       return
     }
     if (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED' || event === 'USER_UPDATED') {
@@ -3147,15 +3544,8 @@ export async function initAuthAndAdmin() {
     })
   }
 
-  window.addEventListener('hashchange', () => {
-    if (window.location.hash === '#/admin') openAdminScreen()
-    else if (window.location.hash === '#/perfil') openProfileScreen()
-    else if (window.location.hash === '#/stock') openStockScreen()
-    else if (window.location.hash === '#update-password') {
-      appAuthState.authMode = 'update-password'
-      enforceRouteProtection()
-    }
-  })
+  // popstate and hashchange are handled together by the shared app router.
+  getAppRouter()
 }
 
 if (typeof window !== 'undefined' && document.getElementById('authScreen')) {

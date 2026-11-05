@@ -1,0 +1,65 @@
+{
+  "stage": "before",
+  "method": "Actual application orchestration, simulated Supabase with 20 ms per request, 3 samples. Not production latency.",
+  "medianLoginMs": 246.57499999999982,
+  "medianTwoProfileVisitsMs": 172.0367000000001,
+  "samples": [
+    {
+      "loginMs": 299.3229000000001,
+      "loginRequests": [
+        "auth:signIn",
+        "select:user_profiles",
+        "select:user_profiles",
+        "select:workshop_members",
+        "select:workshops",
+        "storage:download",
+        "select:jobs"
+      ],
+      "twoProfileVisitsMs": 229.3505,
+      "profileVisitRequests": [
+        "select:workshops",
+        "storage:download",
+        "select:workshops",
+        "storage:download"
+      ]
+    },
+    {
+      "loginMs": 246.57499999999982,
+      "loginRequests": [
+        "auth:signIn",
+        "select:user_profiles",
+        "select:user_profiles",
+        "select:workshop_members",
+        "select:workshops",
+        "storage:download",
+        "select:jobs"
+      ],
+      "twoProfileVisitsMs": 172.0367000000001,
+      "profileVisitRequests": [
+        "select:workshops",
+        "storage:download",
+        "select:workshops",
+        "storage:download"
+      ]
+    },
+    {
+      "loginMs": 242.37459999999965,
+      "loginRequests": [
+        "auth:signIn",
+        "select:user_profiles",
+        "select:user_profiles",
+        "select:workshop_members",
+        "select:workshops",
+        "storage:download",
+        "select:jobs"
+      ],
+      "twoProfileVisitsMs": 154.5227,
+      "profileVisitRequests": [
+        "select:workshops",
+        "storage:download",
+        "select:workshops",
+        "storage:download"
+      ]
+    }
+  ]
+}

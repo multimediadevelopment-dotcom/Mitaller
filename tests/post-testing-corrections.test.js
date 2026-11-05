@@ -1,4 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+// The registration helper also attempts a global profile upsert. Keep it local
+// even when the auth client passed by this test is already mocked.
+vi.mock('../Crash_Solution_Publicacion/src/lib/supabase.js', () => ({
+  supabase: null,
+  isSupabaseConfigured: false
+}))
 import fs from 'node:fs'
 import path from 'node:path'
 import { signUpWithEmail } from '../Crash_Solution_Publicacion/src/lib/auth.js'

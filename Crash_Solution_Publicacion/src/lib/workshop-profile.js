@@ -1,5 +1,6 @@
 import { supabase } from './supabase.js'
 import { validateEmail } from './auth.js'
+import { privateReadCache } from './scoped-cache.js'
 
 const LOGO_BUCKET = 'workshop-logos'
 const MAX_LOGO_BYTES = 2 * 1024 * 1024 // 2 MB
@@ -199,7 +200,7 @@ async function blobToDataUrl(blob) {
   })
 }
 
-export async function resolveWorkshopLogoUrl(logoPath) {
+async function resolveLogoUncached(logoPath) {
   if (!supabase || !logoPath) return ''
   try {
     const { data: blob, error: dlErr } = await supabase.storage.from(LOGO_BUCKET).download(logoPath)
@@ -218,7 +219,27 @@ export async function resolveWorkshopLogoUrl(logoPath) {
   return ''
 }
 
+export async function resolveWorkshopLogoUrl(logoPath) {
+  if (!logoPath) return ''
+  try {
+    return await privateReadCache.read(`logo:${logoPath}`, async () => {
+      const url = await resolveLogoUncached(logoPath)
+      if (!url) throw new Error('Logo no disponible')
+      return url
+    }, 45 * 60 * 1000)
+  } catch { return '' }
+}
+
+export function rememberWorkshopProfile(profile, token = privateReadCache.token()) {
+  if (profile?.id) privateReadCache.seed(`workshop-profile:${profile.id}`, profile, 30000, token)
+  return profile
+}
+
 export async function fetchWorkshopProfile(workshopId) {
+  return privateReadCache.read(`workshop-profile:${workshopId}`, () => fetchProfileUncached(workshopId))
+}
+
+async function fetchProfileUncached(workshopId) {
   if (!supabase || !workshopId) return null
   const { data, error } = await supabase
     .from('workshops')
@@ -237,6 +258,7 @@ export async function fetchWorkshopProfile(workshopId) {
 }
 
 export async function updateWorkshopProfile(workshopId, input) {
+  const cacheToken = privateReadCache.token()
   if (!supabase || !workshopId) {
     throw new Error('Seleccioná un taller activo para guardar su perfil.')
   }
@@ -250,6 +272,7 @@ export async function updateWorkshopProfile(workshopId, input) {
     payload.logo_path = input.logo_path || null
   }
 
+  privateReadCache.invalidate(`workshop-profile:${workshopId}`)
   const { data, error } = await supabase
     .from('workshops')
     .update(payload)
@@ -259,10 +282,11 @@ export async function updateWorkshopProfile(workshopId, input) {
 
   if (error) throw error
   const logo_url = data.logo_path ? await resolveWorkshopLogoUrl(data.logo_path) : ''
-  return { ...data, logo_url }
+  return rememberWorkshopProfile({ ...data, logo_url }, cacheToken)
 }
 
 export async function uploadWorkshopLogo(workshopId, file) {
+  const cacheToken = privateReadCache.token()
   if (!supabase || !workshopId) {
     throw new Error('Seleccioná un taller activo antes de subir el logo.')
   }
@@ -271,15 +295,46 @@ export async function uploadWorkshopLogo(workshopId, file) {
     throw new Error(check.error)
   }
 
-  const ext = (file.name?.split('.').pop() || 'png').toLowerCase().replace(/[^a-z0-9]/g, '') || 'png'
-  const storagePath = `${workshopId}/logo.${ext}`
+  const bucket = supabase.storage.from(LOGO_BUCKET)
+  const { data: previous, error: readErr } = await supabase.from('workshops')
+    .select('logo_path').eq('id', workshopId).single()
+  if (readErr) throw readErr
+  const ext = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' }[file.type]
+  // A new object avoids stale browser/CDN caches and never overwrites the current logo.
+  const storagePath = `${workshopId}/logo-${crypto.randomUUID()}.${ext}`
 
-  const { error: uploadErr } = await supabase.storage.from(LOGO_BUCKET).upload(storagePath, file, {
-    upsert: true,
+  const { error: uploadErr } = await bucket.upload(storagePath, file, {
+    upsert: false,
+    cacheControl: '60',
     contentType: file.type
   })
 
   if (uploadErr) throw uploadErr
+
+  const cleanup = async path => {
+    if (!path || !path.startsWith(`${workshopId}/`)) return
+    try {
+      const { error } = await bucket.remove([path])
+      if (error) console.warn('No se pudo limpiar el logo anterior:', error.message)
+    } catch (error) {
+      console.warn('No se pudo limpiar el logo anterior:', error.message)
+    }
+  }
+
+  // Verify the private object and its display permissions before committing the path.
+  let logo_url
+  try {
+    const { data: signed, error: signErr } = await bucket.createSignedUrl(storagePath, 3600)
+    if (signErr || !signed?.signedUrl) throw signErr || new Error('No se pudo generar la URL firmada del logo.')
+    const { data: stored, error: downloadErr } = await bucket.download(storagePath)
+    if (downloadErr || !stored?.size || stored.size !== file.size) {
+      throw downloadErr || new Error('No se pudo verificar el archivo guardado en Storage.')
+    }
+    logo_url = await blobToDataUrl(stored)
+  } catch (error) {
+    await cleanup(storagePath)
+    throw error
+  }
 
   const { data: updated, error: dbErr } = await supabase
     .from('workshops')
@@ -288,13 +343,23 @@ export async function uploadWorkshopLogo(workshopId, file) {
     .select('id, name, legal_name, tax_id, logo_path, phone, whatsapp, email, address, created_by, created_at')
     .single()
 
-  if (dbErr) throw dbErr
+  if (dbErr || updated?.logo_path !== storagePath) {
+    // A network error may occur after the server committed the update. Keep the
+    // new object in that case; deleting it could leave a dangling database path.
+    throw dbErr || new Error('No se pudo confirmar la ruta del logo en el taller.')
+  }
+  const { data: persisted, error: verifyErr } = await supabase.from('workshops')
+    .select('logo_path').eq('id', workshopId).single()
+  if (verifyErr || persisted?.logo_path !== storagePath) {
+    throw verifyErr || new Error('La ruta del logo no quedó guardada. Volvé a cargar el perfil.')
+  }
+  if (previous?.logo_path !== storagePath) await cleanup(previous?.logo_path)
+  if (previous?.logo_path) privateReadCache.invalidate(`logo:${previous.logo_path}`)
 
-  const dataUrl = await blobToDataUrl(file).catch(() => '')
-  const logo_url = dataUrl || (await resolveWorkshopLogoUrl(storagePath))
-
-  return {
+  privateReadCache.invalidate(`workshop-profile:${workshopId}`)
+  privateReadCache.seed(`logo:${storagePath}`, logo_url, 45 * 60 * 1000, cacheToken)
+  return rememberWorkshopProfile({
     ...updated,
     logo_url
-  }
+  }, cacheToken)
 }

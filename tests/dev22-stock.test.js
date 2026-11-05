@@ -8,7 +8,7 @@ import {
   formatCompatibilityLabel,
   filterStockItems
 } from '../Crash_Solution_Publicacion/src/lib/stock.js'
-import { supabase } from '../Crash_Solution_Publicacion/src/lib/supabase.js'
+import { supabase, liveTestsEnabled } from './live-supabase.js'
 
 describe('DEV-22 — Sistema de Stock, Compatibilidad Vehicular, Movimientos RPC y Aislamiento RLS', () => {
   it('valida el alta y edición de productos de taller (pinturas, materiales, insumos, repuestos)', () => {
@@ -188,7 +188,7 @@ describe('DEV-22 — Sistema de Stock, Compatibilidad Vehicular, Movimientos RPC
     expect(byLocation.map(i => i.id)).toEqual(['2'])
   })
 
-  it('verifica en vivo contra Supabase que un usuario sin membresía en un taller ajeno no puede leer ni modificar su stock', async () => {
+  it.skipIf(!liveTestsEnabled)('verifica en vivo contra Supabase que un usuario sin membresía en un taller ajeno no puede leer ni modificar su stock', async () => {
     expect(supabase).toBeTruthy()
 
     const otherWorkshopId = '99999999-9999-4999-8999-999999999999'
